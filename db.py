@@ -9,7 +9,7 @@ if not DATABASE_URL:
     raise RuntimeError("Defina DATABASE_URL nas variáveis de ambiente")
 
 def connect():
-    # Se seu provedor exigir SSL obrigatório, acrescente ?sslmode=require à URL
+    # Se precisar de SSL forçado: adicione ?sslmode=require à URL
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
