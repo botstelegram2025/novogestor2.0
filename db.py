@@ -10,8 +10,61 @@ if not DATABASE_URL:
     raise RuntimeError("Defina DATABASE_URL nas variáveis de ambiente")
 
 def connect():
-    # Se precisar SSL forçado: acrescente ?sslmode=require à URL (Railway aceita sem)
+    # Se precisar SSL forçado: acrescente ?sslmode=require à URL (Railway geralmente aceita sem)
     return psycopg2.connect(DATABASE_URL)
+
+# ----------------- Templates (defaults) -----------------
+DEFAULT_TEMPLATES: Dict[str, Dict[str, str]] = {
+    "D2": {
+        "title": "Cobrança • 2 dias antes",
+        "body": (
+            "Olá {nome}! 👋\n"
+            "Lembramos que sua fatura do plano {pacote} no valor de {valor} "
+            "vence em {vencimento} (faltam {dias_para_vencer} dias). "
+            "Qualquer dúvida, estou à disposição. ✅"
+        ),
+    },
+    "D1": {
+        "title": "Cobrança • 1 dia antes",
+        "body": (
+            "Olá {nome}! 👋\n"
+            "A fatura do plano {pacote} (valor {valor}) vence amanhã, dia {vencimento}. "
+            "Se precisar, posso te enviar as formas de pagamento. 🙂"
+        ),
+    },
+    "D0": {
+        "title": "Cobrança • vence hoje",
+        "body": (
+            "Olá {nome}! 👋\n"
+            "Sua fatura do plano {pacote} (valor {valor}) vence hoje ({vencimento}). "
+            "Conte comigo para qualquer suporte. ✅"
+        ),
+    },
+    "DA1": {
+        "title": "Cobrança • 1 dia após",
+        "body": (
+            "Olá {nome}! 👋\n"
+            "Notamos que sua fatura do plano {pacote} (valor {valor}) venceu em {vencimento} "
+            "({dias_atraso} dia(s) de atraso). Pode me confirmar o pagamento ou preciso te enviar novamente? 🙏"
+        ),
+    },
+    "RENOV": {
+        "title": "Renovação de plano",
+        "body": (
+            "Olá {nome}! 👋\n"
+            "Podemos confirmar a renovação do seu plano {pacote} por {valor}? "
+            "Vencimento atual: {vencimento}. Responda por aqui e já deixo tudo certo. 🔁"
+        ),
+    },
+    "OUTRO": {
+        "title": "Mensagem genérica",
+        "body": (
+            "Olá {nome}! 👋\n"
+            "Segue uma mensagem sobre seu plano {pacote} (valor {valor}, vencimento {vencimento}). "
+            "Qualquer dúvida, fico à disposição. 🙂"
+        ),
+    },
+}
 
 def init_db():
     with connect() as conn:
@@ -47,6 +100,24 @@ def init_db():
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
             """)
+
+            # Tabela de templates
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS templates (
+                id SERIAL PRIMARY KEY,
+                key TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            # Inserir defaults caso não existam
+            for k, t in DEFAULT_TEMPLATES.items():
+                cur.execute(
+                    "INSERT INTO templates (key, title, body) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (key) DO NOTHING;",
+                    (k, t["title"], t["body"])
+                )
         conn.commit()
 
 # ----------------- CLIENTES -----------------
@@ -163,3 +234,49 @@ def inserir_usuario(tg_id: int, nome: str, email: str, telefone: str) -> int:
             new_id = cur.fetchone()[0]
         conn.commit()
         return new_id
+
+# ----------------- TEMPLATES -----------------
+def list_templates() -> List[Dict[str, Any]]:
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT key, title, body FROM templates ORDER BY key;")
+            return [dict(r) for r in cur.fetchall()]
+
+def get_template(key: str) -> Optional[Dict[str, Any]]:
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT key, title, body FROM templates WHERE key=%s;", (key,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+def update_template(key: str, title: Optional[str] = None, body: Optional[str] = None) -> bool:
+    sets, vals = [], []
+    if title is not None:
+        sets.append("title=%s")
+        vals.append(title)
+    if body is not None:
+        sets.append("body=%s")
+        vals.append(body)
+    if not sets:
+        return False
+    vals.append(key)
+    query = "UPDATE templates SET " + ", ".join(sets) + ", updated_at=NOW() WHERE key=%s;"
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, vals)
+        conn.commit()
+    return True
+
+def reset_template(key: str) -> bool:
+    default = DEFAULT_TEMPLATES.get(key)
+    if not default:
+        return False
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO templates (key, title, body) VALUES (%s, %s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET title=EXCLUDED.title, body=EXCLUDED.body, updated_at=NOW();",
+                (key, default["title"], default["body"])
+            )
+        conn.commit()
+    return True
