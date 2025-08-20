@@ -66,4 +66,100 @@ def inserir_cliente(
                 (nome, telefone, pacote, valor, vencimento, info),
             )
             new_id = cur.fetchone()[0]
-        conn.commit
+        conn.commit()
+        return new_id
+
+def listar_clientes(limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, nome, telefone, pacote, valor, vencimento, info, created_at "
+                "FROM clientes ORDER BY id DESC LIMIT %s OFFSET %s;",
+                (limit, offset),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+def contar_clientes() -> int:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM clientes;")
+            return cur.fetchone()[0]
+
+def buscar_cliente_por_id(cid: int) -> Optional[Dict[str, Any]]:
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM clientes WHERE id = %s;", (cid,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+def deletar_cliente(cid: int) -> bool:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM clientes WHERE id = %s;", (cid,))
+        conn.commit()
+        return True
+
+def atualizar_cliente(cid: int, **fields) -> bool:
+    """Atualiza campos do cliente. Campos: nome, telefone, pacote, valor, vencimento, info, email."""
+    allowed = {"nome", "telefone", "pacote", "valor", "vencimento", "info", "email"}
+    set_parts, values = [], []
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        if k == "vencimento" and isinstance(v, str):
+            try:
+                v = datetime.fromisoformat(v).date()
+            except ValueError:
+                pass
+        set_parts.append(f"{k}=%s")
+        values.append(v)
+    if not set_parts:
+        return False
+    values.append(cid)
+    query = "UPDATE clientes SET " + ", ".join(set_parts) + " WHERE id=%s;"
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, values)
+        conn.commit()
+    return True
+
+def renovar_vencimento(cid: int, months: int) -> Optional[date]:
+    """Soma 'months' ao vencimento atual (ou hoje se vazio) e retorna a nova data."""
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT vencimento FROM clientes WHERE id=%s;", (cid,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            base = row["vencimento"] or date.today()
+            new_date = _add_months(base, months)
+            cur.execute("UPDATE clientes SET vencimento=%s WHERE id=%s;", (new_date, cid))
+        conn.commit()
+        return new_date
+
+def _add_months(d: date, months: int) -> date:
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    last_day = [31, 29 if (y%4==0 and (y%100!=0 or y%400==0)) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m-1]
+    day = min(d.day, last_day)
+    return date(y, m, day)
+
+# ----------------- USUÁRIOS -----------------
+def buscar_usuario(tg_id: int) -> Optional[Dict[str, Any]]:
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM usuarios WHERE tg_id = %s;", (tg_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+def inserir_usuario(tg_id: int, nome: str, email: str, telefone: str) -> int:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO usuarios (tg_id, nome, email, telefone) "
+                "VALUES (%s, %s, %s, %s) RETURNING id;",
+                (tg_id, nome, email, telefone),
+            )
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        return new_id
