@@ -8,7 +8,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     Message,
     ReplyKeyboardMarkup, KeyboardButton,
@@ -38,7 +38,9 @@ class NovoCliente(StatesGroup):
     nome = State()
     telefone = State()
     pacote = State()
+    pacote_personalizado = State()
     valor = State()
+    valor_personalizado = State()
     vencimento = State()
     info = State()
 
@@ -111,16 +113,59 @@ def cliente_kb(cid: int):
         [InlineKeyboardButton(text="🗑️ Excluir", callback_data=f"del:{cid}")]
     ])
 
-# Teclado persistente (principal)
-main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="➕ Novo Cliente"), KeyboardButton(text="📋 Clientes")],
-        [KeyboardButton(text="❌ Cancelar")]
-    ],
-    is_persistent=True,
-    resize_keyboard=True,
-    input_field_placeholder="Escolha uma opção…"
-)
+# ---------------------- Teclados ----------------------
+def kb_main():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Novo Cliente"), KeyboardButton(text="📋 Clientes")],
+            [KeyboardButton(text="❌ Cancelar")]
+        ],
+        is_persistent=True,
+        resize_keyboard=True,
+        input_field_placeholder="Escolha uma opção…"
+    )
+
+PACOTE_LABELS = [
+    "📅 Mensal", "🗓️ Trimestral", "🗓️ Semestral", "📆 Anual", "🛠️ Personalizado"
+]
+PACOTE_MAP = {
+    "📅 Mensal": "Mensal",
+    "🗓️ Trimestral": "Trimestral",
+    "🗓️ Semestral": "Semestral",
+    "📆 Anual": "Anual",
+}
+def kb_pacotes():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=PACOTE_LABELS[0]), KeyboardButton(text=PACOTE_LABELS[1])],
+            [KeyboardButton(text=PACOTE_LABELS[2]), KeyboardButton(text=PACOTE_LABELS[3])],
+            [KeyboardButton(text=PACOTE_LABELS[4])],
+            [KeyboardButton(text="❌ Cancelar")]
+        ],
+        is_persistent=True,
+        resize_keyboard=True,
+        input_field_placeholder="Escolha um pacote…"
+    )
+
+VALORES_LABELS = [
+    "💵 25,00", "💵 30,00", "💵 35,00",
+    "💵 40,00", "💵 45,00", "💵 50,00",
+    "💵 60,00", "💵 70,00", "💵 75,00",
+    "💵 90,00", "✍️ Outro valor"
+]
+def kb_valores():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=VALORES_LABELS[0]), KeyboardButton(text=VALORES_LABELS[1]), KeyboardButton(text=VALORES_LABELS[2])],
+            [KeyboardButton(text=VALORES_LABELS[3]), KeyboardButton(text=VALORES_LABELS[4]), KeyboardButton(text=VALORES_LABELS[5])],
+            [KeyboardButton(text=VALORES_LABELS[6]), KeyboardButton(text=VALORES_LABELS[7]), KeyboardButton(text=VALORES_LABELS[8])],
+            [KeyboardButton(text=VALORES_LABELS[9]), KeyboardButton(text=VALORES_LABELS[10])],
+            [KeyboardButton(text="❌ Cancelar")]
+        ],
+        is_persistent=True,
+        resize_keyboard=True,
+        input_field_placeholder="Escolha um valor…"
+    )
 
 # ---------------------- Boot ----------------------
 load_dotenv()
@@ -138,12 +183,12 @@ async def cmd_start(m: Message, state: FSMContext):
     if user:
         await m.answer(
             f"👋 Olá, {user.get('nome') or m.from_user.first_name}! O que deseja fazer?",
-            reply_markup=main_kb
+            reply_markup=kb_main()
         )
     else:
         await m.answer(
             "👋 Bem-vindo! Antes de usar, preciso do seu cadastro.\nQual é o seu <b>nome</b>?",
-            reply_markup=main_kb
+            reply_markup=kb_main()
         )
         await state.set_state(CadastroUsuario.nome)
 
@@ -155,11 +200,11 @@ async def cmd_help(m: Message):
         "• /help — ajuda\n"
         "• /id 123 — detalhes do cliente por ID\n"
         "\nUse o teclado para ➕ Novo Cliente ou 📋 Clientes.",
-        reply_markup=main_kb
+        reply_markup=kb_main()
     )
 
 @dp.message(Command("id"))
-async def cmd_id(m: Message, command: Command):
+async def cmd_id(m: Message, command: CommandObject):
     if not command.args or not command.args.strip().isdigit():
         await m.answer("Uso: <code>/id 123</code>")
         return
@@ -178,14 +223,14 @@ async def cad_nome(m: Message, state: FSMContext):
         await m.answer("Nome muito curto. Informe seu <b>nome</b> completo.")
         return
     await state.update_data(nome=nome)
-    await m.answer("📧 Agora, seu <b>email</b>:")
+    await m.answer("📧 Agora, seu <b>email</b>:", reply_markup=kb_main())
     await state.set_state(CadastroUsuario.email)
 
 @dp.message(CadastroUsuario.email)
 async def cad_email(m: Message, state: FSMContext):
     email = m.text.strip()
     await state.update_data(email=email)
-    await m.answer("📱 Por fim, seu <b>telefone</b> (com DDD):")
+    await m.answer("📱 Por fim, seu <b>telefone</b> (com DDD):", reply_markup=kb_main())
     await state.set_state(CadastroUsuario.telefone)
 
 @dp.message(CadastroUsuario.telefone)
@@ -200,13 +245,12 @@ async def cad_tel(m: Message, state: FSMContext):
         telefone=data["telefone"] or ""
     )
     await state.clear()
-    await m.answer("✅ Cadastro concluído! Use os botões abaixo.", reply_markup=main_kb)
+    await m.answer("✅ Cadastro concluído! Use os botões abaixo.", reply_markup=kb_main())
 
 # ---------------------- Handlers: Clientes ----------------------
-# Iniciar cadastro
 @dp.message(F.text.casefold() == "➕ novo cliente")
 async def novo_cliente_start(m: Message, state: FSMContext):
-    await m.answer("Vamos cadastrar um cliente.\nQual é o <b>nome</b>?", reply_markup=main_kb)
+    await m.answer("Vamos cadastrar um cliente.\nQual é o <b>nome</b>?", reply_markup=kb_main())
     await state.set_state(NovoCliente.nome)
 
 @dp.message(NovoCliente.nome)
@@ -216,7 +260,7 @@ async def nc_nome(m: Message, state: FSMContext):
         await m.answer("Nome muito curto. Informe o <b>nome</b> completo.")
         return
     await state.update_data(nome=nome)
-    await m.answer("📞 Informe o <b>telefone</b> (com DDD).")
+    await m.answer("📞 Informe o <b>telefone</b> (com DDD).", reply_markup=kb_main())
     await state.set_state(NovoCliente.telefone)
 
 @dp.message(NovoCliente.telefone)
@@ -226,24 +270,60 @@ async def nc_tel(m: Message, state: FSMContext):
         await m.answer("Telefone inválido. Ex.: +55 11 99999-0000")
         return
     await state.update_data(telefone=tel)
-    await m.answer("📦 Qual é o <b>pacote</b>? (ex.: Plano Mensal 50MB)")
+    await m.answer("📦 Escolha um <b>pacote</b> ou toque em Personalizado:", reply_markup=kb_pacotes())
     await state.set_state(NovoCliente.pacote)
 
 @dp.message(NovoCliente.pacote)
 async def nc_pacote(m: Message, state: FSMContext):
-    pacote = m.text.strip() if m.text else None
+    txt = (m.text or "").strip()
+    low = txt.lower()
+    # Personalizado → pede para digitar
+    if "personalizado" in low:
+        await m.answer("🛠️ Digite o <b>nome do pacote</b> desejado:", reply_markup=kb_main())
+        await state.set_state(NovoCliente.pacote_personalizado)
+        return
+    # Se clicou num botão conhecido, mapeia para o rótulo limpo
+    if txt in PACOTE_MAP:
+        await state.update_data(pacote=PACOTE_MAP[txt])
+    else:
+        # Usuário digitou algo — aceita como pacote
+        await state.update_data(pacote=txt if txt else None)
+    await m.answer("💰 Escolha um <b>valor</b> ou toque em Outro valor:", reply_markup=kb_valores())
+    await state.set_state(NovoCliente.valor)
+
+@dp.message(NovoCliente.pacote_personalizado)
+async def nc_pacote_perso(m: Message, state: FSMContext):
+    pacote = m.text.strip()
+    if not pacote:
+        await m.answer("Informe um <b>nome de pacote</b> válido.")
+        return
     await state.update_data(pacote=pacote)
-    await m.answer("💰 Qual é o <b>valor</b>? (ex.: 89,90)")
+    await m.answer("💰 Escolha um <b>valor</b> ou toque em Outro valor:", reply_markup=kb_valores())
     await state.set_state(NovoCliente.valor)
 
 @dp.message(NovoCliente.valor)
 async def nc_valor(m: Message, state: FSMContext):
-    valor = parse_valor(m.text)
+    txt = (m.text or "").strip()
+    if "outro valor" in txt.lower():
+        await m.answer("✍️ Digite o <b>valor</b> (ex.: 89,90):", reply_markup=kb_main())
+        await state.set_state(NovoCliente.valor_personalizado)
+        return
+    valor = parse_valor(txt)
     if valor is None:
-        await m.answer("Valor inválido. Tente algo como <code>89,90</code>.")
+        await m.answer("Valor inválido. Tente algo como <code>89,90</code> ou escolha um botão.")
         return
     await state.update_data(valor=float(valor))
-    await m.answer("📅 Qual é a <b>data de vencimento</b>? (ex.: 10/09/2025 ou 10/09)")
+    await m.answer("📅 Qual é a <b>data de vencimento</b>? (ex.: 10/09/2025 ou 10/09)", reply_markup=kb_main())
+    await state.set_state(NovoCliente.vencimento)
+
+@dp.message(NovoCliente.valor_personalizado)
+async def nc_valor_perso(m: Message, state: FSMContext):
+    valor = parse_valor(m.text)
+    if valor is None:
+        await m.answer("Valor inválido. Ex.: <code>89,90</code>.")
+        return
+    await state.update_data(valor=float(valor))
+    await m.answer("📅 Qual é a <b>data de vencimento</b>? (ex.: 10/09/2025 ou 10/09)", reply_markup=kb_main())
     await state.set_state(NovoCliente.vencimento)
 
 @dp.message(NovoCliente.vencimento)
@@ -253,7 +333,7 @@ async def nc_venc(m: Message, state: FSMContext):
         await m.answer("Data inválida. Use <code>dd/mm/aaaa</code>, <code>dd/mm</code> ou <code>aaaa-mm-dd</code>.")
         return
     await state.update_data(vencimento=data_v.isoformat())
-    await m.answer("📝 Outras informações (MAC, OTP etc.). Se não houver, digite <i>sem</i>.")
+    await m.answer("📝 Outras informações (MAC, OTP etc.). Se não houver, digite <i>sem</i>.", reply_markup=kb_main())
     await state.set_state(NovoCliente.info)
 
 @dp.message(NovoCliente.info)
@@ -282,76 +362,16 @@ async def nc_info(m: Message, state: FSMContext):
         "info": data.get("info"),
     }
     await m.answer(f"✅ Cliente cadastrado com ID <b>#{cid}</b>.\n\n{fmt_cliente(resumo)}",
-                   reply_markup=main_kb)
+                   reply_markup=kb_main())
 
 # Cancelar qualquer fluxo
 @dp.message(F.text.casefold() == "❌ cancelar")
 async def cancelar(m: Message, state: FSMContext):
     await state.clear()
-    await m.answer("Operação cancelada.", reply_markup=main_kb)
+    await m.answer("Operação cancelada.", reply_markup=kb_main())
 
 # Listar clientes
 @dp.message(F.text.casefold() == "📋 clientes")
 async def ver_clientes(m: Message):
     total = contar_clientes()
     items = listar_clientes(limit=10, offset=0)
-    if not items:
-        await m.answer("Ainda não há clientes.", reply_markup=main_kb)
-        return
-    texto = "<b>Clientes (mais recentes):</b>\n\n" + "\n\n".join(
-        f"#{c['id']} • {c['nome']} — {c.get('pacote') or '—'}" for c in items
-    )
-    await m.answer(texto, reply_markup=pagina_kb(0, 10, total))
-
-@dp.callback_query(F.data.startswith("pg:"))
-async def cb_pagina(cq: CallbackQuery):
-    offset = int(cq.data.split(":")[1])
-    total = contar_clientes()
-    items = listar_clientes(limit=10, offset=offset)
-    texto = "<b>Clientes:</b>\n\n" + ("\n\n".join(
-        f"#{c['id']} • {c['nome']} — {c.get('pacote') or '—'}" for c in items
-    ) if items else "Sem resultados.")
-    await cq.message.edit_text(texto, reply_markup=pagina_kb(offset, 10, total))
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("cid:"))
-async def cb_cliente(cq: CallbackQuery):
-    cid = int(cq.data.split(":")[1])
-    c = buscar_cliente_por_id(cid)
-    if not c:
-        await cq.answer("Cliente não encontrado", show_alert=True)
-        return
-    await cq.message.answer("🗂️ Detalhes do cliente:\n\n" + fmt_cliente(c), reply_markup=cliente_kb(cid))
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("del:"))
-async def cb_del(cq: CallbackQuery):
-    cid = int(cq.data.split(":")[1])
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❗ Confirmar exclusão", callback_data=f"delc:{cid}")],
-        [InlineKeyboardButton(text="Cancelar", callback_data="noop")]
-    ])
-    await cq.message.answer(f"Tem certeza que deseja excluir o cliente #{cid}?", reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data == "noop")
-async def cb_noop(cq: CallbackQuery):
-    await cq.answer("Operação cancelada.")
-
-@dp.callback_query(F.data.startswith("delc:"))
-async def cb_del_confirm(cq: CallbackQuery):
-    cid = int(cq.data.split(":")[1])
-    deletar_cliente(cid)
-    await cq.message.answer(f"🗑️ Cliente #{cid} excluído.", reply_markup=main_kb)
-    await cq.answer()
-
-# ---------------------- Main ----------------------
-async def main():
-    print("🚀 iniciando… limpando webhook e preparando DB")
-    await bot.delete_webhook(drop_pending_updates=True)
-    init_db()
-    print("✅ pronto. iniciando polling…")
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-
-if __name__ == "__main__":
-    asyncio.run(main())
