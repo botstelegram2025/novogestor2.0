@@ -3,7 +3,7 @@ import os
 import asyncio
 import re
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 from dotenv import load_dotenv
 
@@ -28,6 +28,9 @@ from db import (
     inserir_cliente, listar_clientes, contar_clientes, buscar_cliente_por_id, deletar_cliente,
     atualizar_cliente, renovar_vencimento
 )
+
+# ---------------------- Config de Status de Vencimento ----------------------
+DUE_SOON_DAYS = 5  # até 5 dias para vencer -> 🟡
 
 # ---------------------- Estados (FSM) ----------------------
 class CadastroUsuario(StatesGroup):
@@ -94,6 +97,34 @@ def parse_vencimento(txt: str):
             return None
     return None
 
+def to_date(dv) -> date | None:
+    if not dv:
+        return None
+    if isinstance(dv, date):
+        return dv
+    if isinstance(dv, str):
+        try:
+            return datetime.fromisoformat(dv).date()
+        except ValueError:
+            return None
+    return None
+
+def due_dot(dv) -> str:
+    """
+    🟢 vencimento > hoje + DUE_SOON_DAYS
+    🟡 hoje <= vencimento <= hoje + DUE_SOON_DAYS  (ou sem data)
+    🔴 vencimento < hoje
+    """
+    d = to_date(dv)
+    today = date.today()
+    if d is None:
+        return "🟡"
+    if d < today:
+        return "🔴"
+    if d <= today + timedelta(days=DUE_SOON_DAYS):
+        return "🟡"
+    return "🟢"
+
 def fmt_moeda(v) -> str:
     return f"R$ {float(v):.2f}".replace(".", ",")
 
@@ -112,21 +143,22 @@ def fmt_data(dv) -> str:
 def fmt_cliente(c: dict) -> str:
     v = fmt_moeda(c["valor"]) if c.get("valor") is not None else "—"
     venc = fmt_data(c.get("vencimento"))
+    dot = due_dot(c.get("vencimento"))
     return (
-        f"<b>#{c['id']}</b> • {c.get('nome','—')}\n"
+        f"{dot} <b>#{c['id']}</b> • {c.get('nome','—')}\n"
         f"📞 {c.get('telefone') or '—'} | 📦 {c.get('pacote') or '—'}\n"
         f"💰 {v} | 📅 {venc}\n"
         f"📝 {c.get('info') or '—'}"
     )
 
-def trim(text: str, limit: int = 60) -> str:
-    text = text.strip()
+def trim(text: str, limit: int = 40) -> str:
+    text = (text or "").strip()
     return text if len(text) <= limit else (text[:limit-1] + "…")
 
 def clientes_inline_kb(offset: int, limit: int, total: int, items: list[dict]) -> InlineKeyboardMarkup:
     rows = []
     for c in items:
-        label = f"{trim(c.get('nome','(sem nome)'), 40)} — {fmt_data(c.get('vencimento'))}"
+        label = f"{due_dot(c.get('vencimento'))} {trim(c.get('nome','(sem nome)'), 38)} — {fmt_data(c.get('vencimento'))}"
         rows.append([InlineKeyboardButton(text=label, callback_data=f"cli:{c['id']}:view")])
     nav = []
     if offset > 0:
@@ -485,17 +517,6 @@ async def cb_del_confirm(cq: CallbackQuery):
     await cq.answer()
 
 # ---------------------- Editar Cliente ----------------------
-class EditCliente(StatesGroup):
-    aguardando_campo = State()
-    nome = State()
-    telefone = State()
-    pacote = State()
-    pacote_personalizado = State()
-    valor = State()
-    valor_personalizado = State()
-    vencimento = State()
-    info = State()
-
 @dp.callback_query(F.data.startswith("edit:"))
 async def cb_edit_select(cq: CallbackQuery, state: FSMContext):
     # edit:<cid>:<campo>
@@ -642,9 +663,6 @@ def render_msg(template: str, c: dict) -> str:
         vencimento=venc,
         telefone=c.get("telefone", "")
     )
-
-class MsgCliente(StatesGroup):
-    personalizada = State()
 
 @dp.callback_query(F.data.startswith("msg:"))
 async def cb_msg_menu(cq: CallbackQuery, state: FSMContext):
