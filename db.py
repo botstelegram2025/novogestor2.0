@@ -3,19 +3,20 @@ import os
 import psycopg2
 import psycopg2.extras
 from typing import List, Optional, Dict, Any
+from datetime import date, datetime
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("Defina DATABASE_URL nas variáveis de ambiente")
 
 def connect():
-    # Se precisar de SSL forçado: adicione ?sslmode=require à URL
+    # Se precisar de SSL forçado: acrescente ?sslmode=require na URL do Railway
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
     with connect() as conn:
         with conn.cursor() as cur:
-            # Tabela de clientes (com campos extras)
+            # Tabela de clientes
             cur.execute("""
             CREATE TABLE IF NOT EXISTS clientes (
                 id SERIAL PRIMARY KEY,
@@ -29,13 +30,12 @@ def init_db():
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
             """)
-            # Garantir colunas (para upgrades progressivos)
+            # Garantir colunas em upgrades
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pacote TEXT;")
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS valor NUMERIC(12,2);")
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS vencimento DATE;")
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS info TEXT;")
-
-            # Tabela de usuários (cadastro no primeiro acesso)
+            # Tabela de usuários
             cur.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id SERIAL PRIMARY KEY,
@@ -98,25 +98,52 @@ def deletar_cliente(cid: int) -> bool:
         conn.commit()
         return True
 
-def atualizar_cliente(cid: int, fields: Dict[str, Any]) -> bool:
-    """Atualiza múltiplos campos permitidos."""
-    if not fields:
-        return False
-    allowed = {"nome", "telefone", "email", "pacote", "valor", "vencimento", "info"}
-    sets, values = [], []
+def atualizar_cliente(cid: int, **fields) -> bool:
+    """Atualiza campos do cliente. Campos aceitos: nome, telefone, pacote, valor, vencimento, info."""
+    allowed = {"nome", "telefone", "pacote", "valor", "vencimento", "info", "email"}
+    set_parts = []
+    values = []
     for k, v in fields.items():
-        if k in allowed:
-            sets.append(f"{k} = %s")
-            values.append(v)
-    if not sets:
+        if k not in allowed:
+            continue
+        if k == "vencimento" and isinstance(v, str):
+            try:
+                v = datetime.fromisoformat(v).date()
+            except ValueError:
+                pass
+        set_parts.append(f"{k}=%s")
+        values.append(v)
+    if not set_parts:
         return False
     values.append(cid)
-    sql = f"UPDATE clientes SET {', '.join(sets)} WHERE id = %s;"
+    query = "UPDATE clientes SET " + ", ".join(set_parts) + " WHERE id=%s;"
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, tuple(values))
+            cur.execute(query, values)
         conn.commit()
-        return True
+    return True
+
+def renovar_vencimento(cid: int, months: int) -> Optional[date]:
+    """Soma 'months' ao vencimento atual (ou hoje se vazio). Retorna a nova data."""
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT vencimento FROM clientes WHERE id=%s;", (cid,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            base = row["vencimento"] or date.today()
+            new_date = _add_months(base, months)
+            cur.execute("UPDATE clientes SET vencimento=%s WHERE id=%s;", (new_date, cid))
+        conn.commit()
+        return new_date
+
+def _add_months(d: date, months: int) -> date:
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    # último dia do mês
+    last_day = [31, 29 if (y%4==0 and (y%100!=0 or y%400==0)) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m-1]
+    day = min(d.day, last_day)
+    return date(y, m, day)
 
 # ----------------- USUÁRIOS -----------------
 def buscar_usuario(tg_id: int) -> Optional[Dict[str, Any]]:
