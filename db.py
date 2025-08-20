@@ -1,17 +1,7 @@
-import os
-import psycopg2
-import psycopg2.extras
-from typing import List, Optional, Dict, Any
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-def connect():
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
-
 def init_db():
     with connect() as conn:
         cur = conn.cursor()
+        # tabela clientes (já existia)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             id SERIAL PRIMARY KEY,
@@ -21,37 +11,33 @@ def init_db():
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
         """)
+        # nova tabela usuarios
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id SERIAL PRIMARY KEY,
+            tg_id BIGINT UNIQUE NOT NULL,
+            nome TEXT,
+            email TEXT,
+            telefone TEXT,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
         conn.commit()
 
-def inserir_cliente(nome: str, telefone: Optional[str], email: Optional[str]) -> int:
+def buscar_usuario(tg_id: int) -> Optional[Dict[str, Any]]:
+    with connect() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM usuarios WHERE tg_id = %s;", (tg_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+def inserir_usuario(tg_id: int, nome: str, email: str, telefone: str) -> int:
     with connect() as conn:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO clientes (nome, telefone, email) VALUES (%s, %s, %s) RETURNING id;",
-            (nome, telefone, email),
+            "INSERT INTO usuarios (tg_id, nome, email, telefone) VALUES (%s, %s, %s, %s) RETURNING id;",
+            (tg_id, nome, email, telefone),
         )
         new_id = cur.fetchone()[0]
         conn.commit()
         return new_id
-
-def listar_clientes(limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
-    with connect() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            "SELECT id, nome, telefone, email, created_at FROM clientes ORDER BY id DESC LIMIT %s OFFSET %s",
-            (limit, offset),
-        )
-        return [dict(r) for r in cur.fetchall()]
-
-def contar_clientes() -> int:
-    with connect() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM clientes;")
-        return cur.fetchone()[0]
-
-def buscar_cliente_por_id(cid: int) -> Optional[Dict[str, Any]]:
-    with connect() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM clientes WHERE id = %s;", (cid,))
-        row = cur.fetchone()
-        return dict(row) if row else None
