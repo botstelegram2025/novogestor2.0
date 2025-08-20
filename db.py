@@ -9,12 +9,13 @@ if not DATABASE_URL:
     raise RuntimeError("Defina DATABASE_URL nas variáveis de ambiente")
 
 def connect():
+    # Se seu provedor exigir SSL obrigatório, acrescente ?sslmode=require à URL
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
     with connect() as conn:
         with conn.cursor() as cur:
-            # Tabela clientes com novos campos
+            # Tabela de clientes (com campos extras)
             cur.execute("""
             CREATE TABLE IF NOT EXISTS clientes (
                 id SERIAL PRIMARY KEY,
@@ -28,13 +29,13 @@ def init_db():
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
             """)
-            # Garantir colunas (para quem já tinha tabela antiga)
+            # Garantir colunas (para upgrades)
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pacote TEXT;")
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS valor NUMERIC(12,2);")
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS vencimento DATE;")
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS info TEXT;")
 
-            # Tabela usuarios (cadastro do primeiro acesso)
+            # Tabela de usuários (cadastro no primeiro acesso)
             cur.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id SERIAL PRIMARY KEY,
@@ -48,8 +49,14 @@ def init_db():
         conn.commit()
 
 # ----------------- CLIENTES -----------------
-def inserir_cliente(nome: str, telefone: Optional[str], pacote: Optional[str],
-                    valor: Optional[float], vencimento: Optional[str], info: Optional[str]) -> int:
+def inserir_cliente(
+    nome: str,
+    telefone: Optional[str],
+    pacote: Optional[str],
+    valor: Optional[float],
+    vencimento: Optional[str],
+    info: Optional[str],
+) -> int:
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
