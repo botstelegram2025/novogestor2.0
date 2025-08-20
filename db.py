@@ -29,7 +29,7 @@ def init_db():
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
             """)
-            # Garantir colunas (para upgrades)
+            # Garantir colunas (para upgrades progressivos)
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pacote TEXT;")
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS valor NUMERIC(12,2);")
             cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS vencimento DATE;")
@@ -95,6 +95,26 @@ def deletar_cliente(cid: int) -> bool:
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM clientes WHERE id = %s;", (cid,))
+        conn.commit()
+        return True
+
+def atualizar_cliente(cid: int, fields: Dict[str, Any]) -> bool:
+    """Atualiza múltiplos campos permitidos."""
+    if not fields:
+        return False
+    allowed = {"nome", "telefone", "email", "pacote", "valor", "vencimento", "info"}
+    sets, values = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k} = %s")
+            values.append(v)
+    if not sets:
+        return False
+    values.append(cid)
+    sql = f"UPDATE clientes SET {', '.join(sets)} WHERE id = %s;"
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(values))
         conn.commit()
         return True
 
