@@ -119,55 +119,59 @@ def fmt_cliente(c: dict) -> str:
         f"📝 {c.get('info') or '—'}"
     )
 
-def pagina_kb(offset: int, limit: int, total: int):
-    kb = InlineKeyboardBuilder()
-    prev_off = max(offset - limit, 0)
-    next_off = offset + limit
-    if offset > 0:
-        kb.button(text="⬅️ Anteriores", callback_data=f"pg:{prev_off}")
-    if next_off < total:
-        kb.button(text="Próximos ➡️", callback_data=f"pg:{next_off}")
-    kb.adjust(2)
-    return kb.as_markup()
+def trim(text: str, limit: int = 60) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else (text[:limit-1] + "…")
 
-def cliente_actions_kb(cid: int):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+def clientes_inline_kb(offset: int, limit: int, total: int, items: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for c in items:
+        label = f"{trim(c.get('nome','(sem nome)'), 40)} — {fmt_data(c.get('vencimento'))}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"cli:{c['id']}:view")])
+    nav = []
+    if offset > 0:
+        prev_off = max(offset - limit, 0)
+        nav.append(InlineKeyboardButton(text="⬅️ Anteriores", callback_data=f"list:page:{prev_off}"))
+    if offset + limit < total:
+        next_off = offset + limit
+        nav.append(InlineKeyboardButton(text="Próximos ➡️", callback_data=f"list:page:{next_off}"))
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def cliente_actions_kb(cid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Editar", callback_data=f"cli:{cid}:edit"),
          InlineKeyboardButton(text="🔁 Renovar", callback_data=f"cli:{cid}:renew")],
         [InlineKeyboardButton(text="💬 Mensagem", callback_data=f"cli:{cid}:msg"),
          InlineKeyboardButton(text="🗑️ Excluir", callback_data=f"cli:{cid}:del")],
-        [InlineKeyboardButton(text="⬅️ Voltar à lista", callback_data="list:back")]
+        [InlineKeyboardButton(text="⬅️ Voltar à lista", callback_data="list:page:0")]
     ])
-    return kb
 
-def edit_menu_kb(cid: int):
+def edit_menu_kb(cid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Nome", callback_data=f"edit:{cid}:nome"),
          InlineKeyboardButton(text="📞 Telefone", callback_data=f"edit:{cid}:telefone")],
         [InlineKeyboardButton(text="📦 Pacote", callback_data=f"edit:{cid}:pacote"),
          InlineKeyboardButton(text="💰 Valor", callback_data=f"edit:{cid}:valor")],
-        [InlineKeyboardButton(text="📅 Vencimento", callback_data=f"edit:{cid}:venc"),
-         InlineKeyboardButton(text="📝 Info", callback_data=f"edit:{cid}:info")],
+        [InlineKeyboardButton(text="📝 Informações", callback_data=f"edit:{cid}:info"),
+         InlineKeyboardButton(text="📅 Vencimento", callback_data=f"edit:{cid}:venc")],
         [InlineKeyboardButton(text="⬅️ Voltar", callback_data=f"cli:{cid}:view")]
     ])
 
-def renew_menu_kb(cid: int, pacote: str | None):
-    # opções fixas; se tiver pacote conhecido, mostra "Usar pacote atual"
-    row1 = [
-        InlineKeyboardButton(text="Mensal +1M", callback_data=f"renew:{cid}:1"),
-        InlineKeyboardButton(text="Trimestral +3M", callback_data=f"renew:{cid}:3")
+def renew_menu_kb(cid: int, pacote: str | None) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Mensal +1M", callback_data=f"renew:{cid}:1"),
+         InlineKeyboardButton(text="Trimestral +3M", callback_data=f"renew:{cid}:3")],
+        [InlineKeyboardButton(text="Semestral +6M", callback_data=f"renew:{cid}:6"),
+         InlineKeyboardButton(text="Anual +12M", callback_data=f"renew:{cid}:12")]
     ]
-    row2 = [
-        InlineKeyboardButton(text="Semestral +6M", callback_data=f"renew:{cid}:6"),
-        InlineKeyboardButton(text="Anual +12M", callback_data=f"renew:{cid}:12")
-    ]
-    rows = [row1, row2]
     if pacote and pacote.lower() in {"mensal", "trimestral", "semestral", "anual"}:
         rows.insert(0, [InlineKeyboardButton(text=f"Usar pacote atual ({pacote})", callback_data=f"renew:{cid}:auto")])
     rows.append([InlineKeyboardButton(text="⬅️ Voltar", callback_data=f"cli:{cid}:view")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def msg_menu_kb(cid: int):
+def msg_menu_kb(cid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧾 Cobrança", callback_data=f"msg:{cid}:cobranca"),
          InlineKeyboardButton(text="📦 Renovação", callback_data=f"msg:{cid}:renovacao")],
@@ -175,8 +179,8 @@ def msg_menu_kb(cid: int):
         [InlineKeyboardButton(text="⬅️ Voltar", callback_data=f"cli:{cid}:view")]
     ])
 
-# ---------------------- Teclados de resposta ----------------------
-def kb_main():
+# ---------------------- Teclados de Resposta ----------------------
+def kb_main() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ Novo Cliente"), KeyboardButton(text="📋 Clientes")],
@@ -194,7 +198,7 @@ PACOTE_MAP = {
     "🗓️ Semestral": "Semestral",
     "📆 Anual": "Anual",
 }
-def kb_pacotes():
+def kb_pacotes() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=PACOTE_LABELS[0]), KeyboardButton(text=PACOTE_LABELS[1])],
@@ -213,7 +217,7 @@ VALORES_LABELS = [
     "💵 60,00", "💵 70,00", "💵 75,00",
     "💵 90,00", "✍️ Outro valor"
 ]
-def kb_valores():
+def kb_valores() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=VALORES_LABELS[0]), KeyboardButton(text=VALORES_LABELS[1]), KeyboardButton(text=VALORES_LABELS[2])],
@@ -409,91 +413,69 @@ async def nc_info(m: Message, state: FSMContext):
     await m.answer(f"✅ Cliente cadastrado com ID <b>#{cid}</b>.\n\n{fmt_cliente(resumo)}",
                    reply_markup=kb_main())
 
-# ---------------------- Handlers: Clientes (listar/ações) ----------------------
+# ---------------------- Listagem Inline e Ações ----------------------
 @dp.message(F.text.casefold() == "📋 clientes")
 async def ver_clientes(m: Message):
+    limit, offset = 10, 0
     total = contar_clientes()
-    items = listar_clientes(limit=10, offset=0)
+    items = listar_clientes(limit=limit, offset=offset)
     if not items:
         await m.answer("Ainda não há clientes.", reply_markup=kb_main())
         return
-    texto = "<b>Clientes (mais recentes):</b>\n\n" + "\n\n".join(
-        f"#{c['id']} • {c['nome']} — {c.get('pacote') or '—'}" for c in items
-    )
-    await m.answer(texto, reply_markup=pagina_kb(0, 10, total))
+    await m.answer("📋 <b>Selecione um cliente</b>:", reply_markup=clientes_inline_kb(offset, limit, total, items))
 
-@dp.callback_query(F.data.startswith("pg:"))
-async def cb_pagina(cq: CallbackQuery):
-    offset = int(cq.data.split(":")[1])
+@dp.callback_query(F.data.startswith("list:page:"))
+async def cb_list_page(cq: CallbackQuery):
+    # list:page:<offset>
+    _, _, off = cq.data.split(":")
+    offset = int(off)
+    limit = 10
     total = contar_clientes()
-    items = listar_clientes(limit=10, offset=offset)
-    texto = "<b>Clientes:</b>\n\n" + ("\n\n".join(
-        f"#{c['id']} • {c['nome']} — {c.get('pacote') or '—'}" for c in items
-    ) if items else "Sem resultados.")
-    await cq.message.edit_text(texto, reply_markup=pagina_kb(offset, 10, total))
+    items = listar_clientes(limit=limit, offset=offset)
+    if not items and offset != 0:
+        offset = 0
+        items = listar_clientes(limit=limit, offset=offset)
+    await cq.message.edit_reply_markup(reply_markup=clientes_inline_kb(offset, limit, total, items))
     await cq.answer()
-
-@dp.callback_query(F.data == "list:back")
-async def cb_list_back(cq: CallbackQuery):
-    total = contar_clientes()
-    items = listar_clientes(limit=10, offset=0)
-    texto = "<b>Clientes (mais recentes):</b>\n\n" + ("\n\n".join(
-        f"#{c['id']} • {c['nome']} — {c.get('pacote') or '—'}" for c in items
-    ) if items else "Sem resultados.")
-    await cq.message.edit_text(texto, reply_markup=pagina_kb(0, 10, total))
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("cid:"))
-async def cb_cliente_view_legacy(cq: CallbackQuery):
-    # compat com versões anteriores; redireciona para novo padrão
-    cid = int(cq.data.split(":")[1])
-    await cb_cli_view(cq, cid)
 
 @dp.callback_query(F.data.startswith("cli:"))
 async def cb_cli_router(cq: CallbackQuery):
-    # Formatos: cli:<cid>:view|edit|renew|msg|del
+    # cli:<cid>:view|edit|renew|msg|del
     _, cid, action = cq.data.split(":")
     cid = int(cid)
+    c = buscar_cliente_por_id(cid)
+    if not c:
+        await cq.answer("Cliente não encontrado", show_alert=True); return
+
     if action == "view":
-        await cb_cli_view(cq, cid)
-    elif action == "edit":
-        c = buscar_cliente_por_id(cid)
-        if not c:
-            await cq.answer("Cliente não encontrado", show_alert=True); return
+        await cq.message.answer("🗂️ Detalhes do cliente:\n\n" + fmt_cliente(c), reply_markup=cliente_actions_kb(cid))
+        await cq.answer(); return
+
+    if action == "edit":
         await cq.message.answer(f"✏️ Editar cliente #{cid}:\n\n{fmt_cliente(c)}", reply_markup=edit_menu_kb(cid))
-        await cq.answer()
-    elif action == "renew":
-        c = buscar_cliente_por_id(cid)
-        if not c:
-            await cq.answer("Cliente não encontrado", show_alert=True); return
+        await cq.answer(); return
+
+    if action == "renew":
         await cq.message.answer(
             f"🔁 Renovar plano do cliente #{cid}:\n\n{fmt_cliente(c)}",
             reply_markup=renew_menu_kb(cid, c.get("pacote"))
         )
-        await cq.answer()
-    elif action == "msg":
-        c = buscar_cliente_por_id(cid)
-        if not c:
-            await cq.answer("Cliente não encontrado", show_alert=True); return
+        await cq.answer(); return
+
+    if action == "msg":
         await cq.message.answer(
             f"💬 Mensagem rápida para cliente #{cid} ({c['nome']}):",
             reply_markup=msg_menu_kb(cid)
         )
-        await cq.answer()
-    elif action == "del":
+        await cq.answer(); return
+
+    if action == "del":
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❗ Confirmar exclusão", callback_data=f"delc:{cid}")],
             [InlineKeyboardButton(text="Cancelar", callback_data=f"cli:{cid}:view")]
         ])
         await cq.message.answer(f"Tem certeza que deseja excluir o cliente #{cid}?", reply_markup=kb)
-        await cq.answer()
-
-async def cb_cli_view(cq: CallbackQuery, cid: int):
-    c = buscar_cliente_por_id(cid)
-    if not c:
-        await cq.answer("Cliente não encontrado", show_alert=True); return
-    await cq.message.answer("🗂️ Detalhes do cliente:\n\n" + fmt_cliente(c), reply_markup=cliente_actions_kb(cid))
-    await cq.answer()
+        await cq.answer(); return
 
 @dp.callback_query(F.data.startswith("delc:"))
 async def cb_del_confirm(cq: CallbackQuery):
@@ -503,6 +485,17 @@ async def cb_del_confirm(cq: CallbackQuery):
     await cq.answer()
 
 # ---------------------- Editar Cliente ----------------------
+class EditCliente(StatesGroup):
+    aguardando_campo = State()
+    nome = State()
+    telefone = State()
+    pacote = State()
+    pacote_personalizado = State()
+    valor = State()
+    valor_personalizado = State()
+    vencimento = State()
+    info = State()
+
 @dp.callback_query(F.data.startswith("edit:"))
 async def cb_edit_select(cq: CallbackQuery, state: FSMContext):
     # edit:<cid>:<campo>
@@ -535,6 +528,7 @@ async def edit_nome(m: Message, state: FSMContext):
     atualizar_cliente(cid, nome=nome)
     await state.clear()
     await m.answer("✅ Nome atualizado.")
+
 @dp.message(EditCliente.telefone)
 async def edit_tel(m: Message, state: FSMContext):
     cid = (await state.get_data()).get("edit_cid")
@@ -542,6 +536,7 @@ async def edit_tel(m: Message, state: FSMContext):
     atualizar_cliente(cid, telefone=tel)
     await state.clear()
     await m.answer("✅ Telefone atualizado.")
+
 @dp.message(EditCliente.pacote)
 async def edit_pacote(m: Message, state: FSMContext):
     cid = (await state.get_data()).get("edit_cid")
@@ -554,6 +549,7 @@ async def edit_pacote(m: Message, state: FSMContext):
     atualizar_cliente(cid, pacote=pacote)
     await state.clear()
     await m.answer("✅ Pacote atualizado.")
+
 @dp.message(EditCliente.pacote_personalizado)
 async def edit_pacote_perso(m: Message, state: FSMContext):
     cid = (await state.get_data()).get("edit_cid")
@@ -561,6 +557,7 @@ async def edit_pacote_perso(m: Message, state: FSMContext):
     atualizar_cliente(cid, pacote=pacote)
     await state.clear()
     await m.answer("✅ Pacote atualizado.")
+
 @dp.message(EditCliente.valor)
 async def edit_valor(m: Message, state: FSMContext):
     cid = (await state.get_data()).get("edit_cid")
@@ -576,6 +573,7 @@ async def edit_valor(m: Message, state: FSMContext):
     atualizar_cliente(cid, valor=float(valor))
     await state.clear()
     await m.answer("✅ Valor atualizado.")
+
 @dp.message(EditCliente.valor_personalizado)
 async def edit_valor_perso(m: Message, state: FSMContext):
     cid = (await state.get_data()).get("edit_cid")
@@ -586,6 +584,7 @@ async def edit_valor_perso(m: Message, state: FSMContext):
     atualizar_cliente(cid, valor=float(valor))
     await state.clear()
     await m.answer("✅ Valor atualizado.")
+
 @dp.message(EditCliente.vencimento)
 async def edit_venc(m: Message, state: FSMContext):
     cid = (await state.get_data()).get("edit_cid")
@@ -596,6 +595,7 @@ async def edit_venc(m: Message, state: FSMContext):
     atualizar_cliente(cid, vencimento=d.isoformat())
     await state.clear()
     await m.answer("✅ Vencimento atualizado.")
+
 @dp.message(EditCliente.info)
 async def edit_info(m: Message, state: FSMContext):
     cid = (await state.get_data()).get("edit_cid")
@@ -642,6 +642,9 @@ def render_msg(template: str, c: dict) -> str:
         vencimento=venc,
         telefone=c.get("telefone", "")
     )
+
+class MsgCliente(StatesGroup):
+    personalizada = State()
 
 @dp.callback_query(F.data.startswith("msg:"))
 async def cb_msg_menu(cq: CallbackQuery, state: FSMContext):
