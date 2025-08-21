@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.types import (
     Message,
     ReplyKeyboardMarkup, KeyboardButton,
@@ -40,8 +40,7 @@ DUE_SOON_DAYS = 5  # até 5 dias para vencer -> 🟡
 load_dotenv()
 TZ_NAME = os.getenv("TZ", "America/Sao_Paulo")
 
-# Fallback automático: se WA_API_BASE não vier do ambiente,
-# usa http://127.0.0.1:$PORT (o Railway injeta $PORT no container).
+# Fallback automático para o Baileys local via $PORT se WA_API_BASE não vier das variáveis
 PORT = os.getenv("PORT")
 WA_API_BASE = os.getenv("WA_API_BASE") or (f"http://127.0.0.1:{PORT}" if PORT else None)
 
@@ -300,6 +299,21 @@ if not BOT_TOKEN:
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
+# ====================== CANCELAMENTO GLOBAL ======================
+# Atende "❌ Cancelar" ou "/cancel" em QUALQUER ETAPA do fluxo (qualquer estado).
+CANCEL_REGEX = r'(?i)^\s*(?:/cancel|/stop|❌\s*cancelar|cancelar)\s*$'
+
+@dp.message(StateFilter("*"), F.text.regexp(CANCEL_REGEX))
+async def cancelar_global(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer("🛑 Operação cancelada. Você está no menu principal.", reply_markup=kb_main())
+
+@dp.message(Command("cancel"))
+async def cancelar_cmd(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer("🛑 Operação cancelada. Você está no menu principal.", reply_markup=kb_main())
+# ================================================================
+
 # ---------------------- WhatsApp microserviço ----------------------
 def wa_format_to_jid(phone: str | None) -> str | None:
     if not phone:
@@ -312,7 +326,6 @@ def wa_format_to_jid(phone: str | None) -> str | None:
     return p
 
 def _wa_base_or_msg() -> str | None:
-    # Helper: retorna base se configurada, senão None
     return WA_API_BASE
 
 def wa_send_now(to_phone: str, text: str) -> tuple[bool, str]:
@@ -407,6 +420,7 @@ async def cmd_help(m: Message):
         "• /help — ajuda\n"
         "• /templates — gerenciar templates de mensagens\n"
         "• /wa — status do WhatsApp (Baileys)\n"
+        "• /cancel — cancelar operação em andamento\n"
         "• /id 123 — detalhes do cliente por ID\n"
         "\nUse o teclado para ➕ Novo Cliente, 📋 Clientes, 🧩 Templates, 🟢 WhatsApp.",
         reply_markup=kb_main()
@@ -417,8 +431,8 @@ async def cmd_wa(m: Message):
     if not WA_API_BASE:
         await m.answer(
             "❌ <b>WhatsApp:</b> WA_API_BASE não configurado.\n"
-            "Mas já configurei um <b>fallback automático</b> para <code>http://127.0.0.1:$PORT</code> se o Railway definir <code>$PORT</code>.\n"
-            "Caso persista, garanta que o <b>supervisord</b> injete WA_API_BASE ou que exista a variável <code>PORT</code> no container."
+            "Foi configurado um <b>fallback automático</b> para <code>http://127.0.0.1:$PORT</code> se o Railway definir <code>$PORT</code>.\n"
+            "Se persistir, verifique o <b>supervisord</b> e as variáveis do serviço."
         )
         return
     ok, health, err = wa_get_health()
@@ -1008,7 +1022,7 @@ async def msg_personalizada(m: Message, state: FSMContext):
     await state.update_data(preview_cid=int(cid), preview_text=text)
     await m.answer("📝 <b>Prévia da mensagem</b>:\n\n" + text, reply_markup=msg_send_options_kb(int(cid)))
 
-# ---------------------- Comando utilitário ----------------------
+# ---------------------- Comandos utilitários ----------------------
 @dp.message(Command("id"))
 async def cmd_id(m: Message, command: CommandObject):
     if not command.args or not command.args.strip().isdigit():
@@ -1021,16 +1035,9 @@ async def cmd_id(m: Message, command: CommandObject):
         return
     await m.answer("🗂️ Detalhes do cliente:\n\n" + fmt_cliente(c), reply_markup=cliente_actions_kb(cid))
 
-# ---------------------- Atalho de teclado para WA ----------------------
 @dp.message(F.text.casefold() == "🟢 whatsapp")
 async def kb_whatsapp_status(m: Message):
     await cmd_wa(m)
-
-# ---------------------- Cancelar ----------------------
-@dp.message(F.text.casefold() == "❌ cancelar")
-async def cancelar(m: Message, state: FSMContext):
-    await state.clear()
-    await m.answer("Operação cancelada.", reply_markup=kb_main())
 
 # ---------------------- Main ----------------------
 async def main():
