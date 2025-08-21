@@ -26,7 +26,7 @@ DUE_SOON_DAYS = 5
 # ------------- Helpers -------------
 def normaliza_tel(v: str | None) -> str | None:
     if not v: return None
-    return ''.join(c for c in v if c.isdigit() or c == '+')
+    return ''.join(c for c in v if c.isdigit())
 
 def parse_valor(txt: str):
     if not txt: return None
@@ -152,6 +152,9 @@ async def nc_nome(m: types.Message, state: FSMContext):
 @dp.message(NovoCliente.telefone)
 async def nc_tel(m: types.Message, state: FSMContext):
     tel = normaliza_tel(m.text)
+    if not tel or not tel.isdigit() or not (10 <= len(tel) <= 13):
+        await m.answer("Telefone inválido. Envie no formato DDD+NÚMERO, apenas números, ex: 11999998888")
+        return
     await state.update_data(telefone=tel)
     await state.set_state(NovoCliente.email)
     await m.answer("📧 Email (pode deixar em branco):")
