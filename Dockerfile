@@ -5,7 +5,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     NODE_ENV=production \
-    WA_API_BASE=http://127.0.0.1:3000 \
     TZ=America/Sao_Paulo
 
 # deps do sistema
@@ -33,13 +32,11 @@ COPY bot_complete.py db.py /app/
 COPY wa_server.js /app/
 COPY supervisord.conf /app/supervisord.conf
 
-# diretório de sessão do Baileys
+# Diretório de sessão do Baileys
 RUN mkdir -p /app/wa_auth
 
-EXPOSE 3000
-
+# Healthcheck usa a porta dinâmica do Railway ($PORT); fallback 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:3000/health || exit 1
+  CMD sh -c 'curl -fsS "http://127.0.0.1:${PORT:-3000}/health" || exit 1'
 
 CMD ["supervisord", "-c", "/app/supervisord.conf"]
-
