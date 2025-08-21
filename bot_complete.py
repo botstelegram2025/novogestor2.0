@@ -20,16 +20,16 @@ from aiogram.enums import ParseMode
 
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from db import (
     init_db,
     buscar_usuario, inserir_usuario,
     inserir_cliente, listar_clientes, contar_clientes, buscar_cliente_por_id, deletar_cliente,
-    atualizar_cliente, renovar_vencimento
+    atualizar_cliente, renovar_vencimento,
+    list_templates, get_template, update_template, reset_template
 )
 
-# ---------------------- Config de Status de Vencimento ----------------------
+# ---------------------- Config de Status/Vencimento ----------------------
 DUE_SOON_DAYS = 5  # até 5 dias para vencer -> 🟡
 
 # ---------------------- Estados (FSM) ----------------------
@@ -49,7 +49,6 @@ class NovoCliente(StatesGroup):
     info = State()
 
 class EditCliente(StatesGroup):
-    aguardando_campo = State()
     nome = State()
     telefone = State()
     pacote = State()
@@ -61,6 +60,9 @@ class EditCliente(StatesGroup):
 
 class MsgCliente(StatesGroup):
     personalizada = State()
+
+class EditTemplate(StatesGroup):
+    waiting_body = State()   # editar apenas body; título permanece
 
 # ---------------------- Helpers ----------------------
 def normaliza_tel(v: str | None) -> str | None:
@@ -203,20 +205,36 @@ def renew_menu_kb(cid: int, pacote: str | None) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="⬅️ Voltar", callback_data=f"cli:{cid}:view")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def msg_menu_kb(cid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧾 Cobrança", callback_data=f"msg:{cid}:cobranca"),
-         InlineKeyboardButton(text="📦 Renovação", callback_data=f"msg:{cid}:renovacao")],
+# --------- Templates: chaves e menus ----------
+TPL_LABELS = {
+    "AUTO": "✨ Sugerir automaticamente",
+    "D2": "🧾 2 dias antes",
+    "D1": "🧾 1 dia antes",
+    "D0": "🧾 Hoje (vencimento)",
+    "DA1": "🧾 1 dia após",
+    "RENOV": "🔁 Renovação",
+    "OUTRO": "🧰 Outro",
+}
+
+def msg_template_menu_kb(cid: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=TPL_LABELS["AUTO"], callback_data=f"tplmsg:{cid}:AUTO")],
+        [InlineKeyboardButton(text=TPL_LABELS["D2"], callback_data=f"tplmsg:{cid}:D2"),
+         InlineKeyboardButton(text=TPL_LABELS["D1"], callback_data=f"tplmsg:{cid}:D1")],
+        [InlineKeyboardButton(text=TPL_LABELS["D0"], callback_data=f"tplmsg:{cid}:D0"),
+         InlineKeyboardButton(text=TPL_LABELS["DA1"], callback_data=f"tplmsg:{cid}:DA1")],
+        [InlineKeyboardButton(text=TPL_LABELS["RENOV"], callback_data=f"tplmsg:{cid}:RENOV"),
+         InlineKeyboardButton(text=TPL_LABELS["OUTRO"], callback_data=f"tplmsg:{cid}:OUTRO")],
         [InlineKeyboardButton(text="✍️ Personalizada", callback_data=f"msg:{cid}:perso")],
         [InlineKeyboardButton(text="⬅️ Voltar", callback_data=f"cli:{cid}:view")]
-    ])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# ---------------------- Teclados de Resposta ----------------------
 def kb_main() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ Novo Cliente"), KeyboardButton(text="📋 Clientes")],
-            [KeyboardButton(text="❌ Cancelar")]
+            [KeyboardButton(text="❌ Cancelar"), KeyboardButton(text="🧩 Templates")]
         ],
         is_persistent=True,
         resize_keyboard=True,
@@ -294,24 +312,87 @@ async def cmd_help(m: Message):
         "<b>Comandos:</b>\n"
         "• /start — menu principal\n"
         "• /help — ajuda\n"
+        "• /templates — gerenciar templates de mensagens\n"
         "• /id 123 — detalhes do cliente por ID\n"
-        "\nUse o teclado para ➕ Novo Cliente ou 📋 Clientes.",
+        "\nUse o teclado para ➕ Novo Cliente, 📋 Clientes, ou 🧩 Templates.",
         reply_markup=kb_main()
     )
 
-@dp.message(Command("id"))
-async def cmd_id(m: Message, command: CommandObject):
-    if not command.args or not command.args.strip().isdigit():
-        await m.answer("Uso: <code>/id 123</code>")
-        return
-    cid = int(command.args.strip())
-    c = buscar_cliente_por_id(cid)
-    if not c:
-        await m.answer(f"Cliente #{cid} não encontrado.")
-        return
-    await m.answer("🗂️ Detalhes do cliente:\n\n" + fmt_cliente(c), reply_markup=cliente_actions_kb(cid))
+# ---------------------- Templates: Gestão via comando/teclado ----------------------
+def templates_list_kb() -> InlineKeyboardMarkup:
+    items = list_templates()
+    rows = []
+    for t in items:
+        key = t["key"]
+        title = t["title"]
+        rows.append([
+            InlineKeyboardButton(text=f"👁️ {title}", callback_data=f"tpl:view:{key}"),
+            InlineKeyboardButton(text="✏️ Editar", callback_data=f"tpl:edit:{key}"),
+            InlineKeyboardButton(text="🔁 Reset", callback_data=f"tpl:reset:{key}"),
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# Cadastro de usuário
+@dp.message(Command("templates"))
+async def cmd_templates(m: Message):
+    await m.answer(
+        "🧩 <b>Templates de Mensagens</b>\n"
+        "Escolha uma opção para visualizar, editar ou resetar para o padrão.\n"
+        "Variáveis suportadas: {nome}, {pacote}, {valor}, {vencimento}, {telefone}, {dias_para_vencer}, {dias_atraso}",
+        reply_markup=templates_list_kb()
+    )
+
+@dp.message(F.text.casefold() == "🧩 templates")
+async def menu_templates(m: Message):
+    await cmd_templates(m)
+
+@dp.callback_query(F.data.startswith("tpl:view:"))
+async def cb_tpl_view(cq: CallbackQuery):
+    key = cq.data.split(":")[2]
+    tpl = get_template(key)
+    if not tpl:
+        await cq.answer("Template não encontrado", show_alert=True); return
+    await cq.message.answer(f"👁️ <b>{tpl['title']}</b>\n\n<code>{tpl['body']}</code>")
+    await cq.answer()
+
+@dp.callback_query(F.data.startswith("tpl:edit:"))
+async def cb_tpl_edit(cq: CallbackQuery, state: FSMContext):
+    key = cq.data.split(":")[2]
+    tpl = get_template(key)
+    if not tpl:
+        await cq.answer("Template não encontrado", show_alert=True); return
+    await state.update_data(edit_tpl_key=key)
+    await state.set_state(EditTemplate.waiting_body)
+    await cq.message.answer(
+        f"✏️ Editando <b>{tpl['title']}</b>\n"
+        "Envie o <b>novo texto</b> do template.\n\n"
+        "Variáveis: {nome}, {pacote}, {valor}, {vencimento}, {telefone}, {dias_para_vencer}, {dias_atraso}\n\n"
+        f"Texto atual:\n<code>{tpl['body']}</code>"
+    )
+    await cq.answer()
+
+@dp.callback_query(F.data.startswith("tpl:reset:"))
+async def cb_tpl_reset(cq: CallbackQuery):
+    key = cq.data.split(":")[2]
+    ok = reset_template(key)
+    if not ok:
+        await cq.answer("Não foi possível resetar (chave inválida).", show_alert=True); return
+    await cq.message.answer("✅ Template resetado para o padrão.")
+    await cq.answer()
+
+@dp.message(EditTemplate.waiting_body)
+async def tpl_receive_body(m: Message, state: FSMContext):
+    data = await state.get_data()
+    key = data.get("edit_tpl_key")
+    if not key:
+        await state.clear()
+        await m.answer("Chave do template ausente. Tente novamente com /templates.")
+        return
+    body = (m.text or "").strip()
+    update_template(key, body=body)
+    await state.clear()
+    await m.answer("✅ Template atualizado.")
+
+# ---------------------- Cadastro de usuário ----------------------
 @dp.message(CadastroUsuario.nome)
 async def cad_nome(m: Message, state: FSMContext):
     nome = m.text.strip()
@@ -342,7 +423,7 @@ async def cad_tel(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("✅ Cadastro concluído! Use os botões abaixo.", reply_markup=kb_main())
 
-# ---------------------- Handlers: Clientes (cadastro guiado) ----------------------
+# ---------------------- Clientes: cadastro guiado ----------------------
 @dp.message(F.text.casefold() == "➕ novo cliente")
 async def novo_cliente_start(m: Message, state: FSMContext):
     await m.answer("Vamos cadastrar um cliente.\nQual é o <b>nome</b>?", reply_markup=kb_main())
@@ -496,8 +577,8 @@ async def cb_cli_router(cq: CallbackQuery):
 
     if action == "msg":
         await cq.message.answer(
-            f"💬 Mensagem rápida para cliente #{cid} ({c['nome']}):",
-            reply_markup=msg_menu_kb(cid)
+            f"💬 Mensagem para cliente #{cid} ({c['nome']}):\nEscolha um template",
+            reply_markup=msg_template_menu_kb(cid)
         )
         await cq.answer(); return
 
@@ -652,63 +733,98 @@ async def cb_renew(cq: CallbackQuery):
     )
     await cq.answer()
 
-# ---------------------- Mensagens Rápidas ----------------------
-def render_msg(template: str, c: dict) -> str:
-    valor = fmt_moeda(c["valor"]) if c.get("valor") is not None else "—"
-    venc = fmt_data(c.get("vencimento"))
-    return template.format(
+# ---------------------- Mensagens (Templates por situação) ----------------------
+def compute_key_auto(venc) -> str:
+    d = to_date(venc)
+    if not d:
+        return "OUTRO"
+    today = date.today()
+    delta = (d - today).days
+    if delta == 2:
+        return "D2"
+    if delta == 1:
+        return "D1"
+    if delta == 0:
+        return "D0"
+    if delta == -1:
+        return "DA1"
+    return "OUTRO"
+
+def render_template_text(body: str, c: dict) -> str:
+    venc = to_date(c.get("vencimento"))
+    today = date.today()
+    dias_para_vencer = (venc - today).days if venc else None
+    dias_atraso = (today - venc).days if (venc and today > venc) else None
+    return body.format(
         nome=c.get("nome", ""),
         pacote=c.get("pacote", "seu plano"),
-        valor=valor,
-        vencimento=venc,
-        telefone=c.get("telefone", "")
+        valor=fmt_moeda(c["valor"]) if c.get("valor") is not None else "—",
+        vencimento=fmt_data(venc),
+        telefone=c.get("telefone", ""),
+        dias_para_vencer=str(dias_para_vencer) if dias_para_vencer is not None else "—",
+        dias_atraso=str(dias_atraso) if dias_atraso is not None else "—",
     )
 
-@dp.callback_query(F.data.startswith("msg:"))
-async def cb_msg_menu(cq: CallbackQuery, state: FSMContext):
-    # msg:<cid>:cobranca|renovacao|perso
-    _, cid, kind = cq.data.split(":")
+@dp.callback_query(F.data.startswith("tplmsg:"))
+async def cb_tplmsg(cq: CallbackQuery, state: FSMContext):
+    # tplmsg:<cid>:<key|AUTO>
+    _, cid, key = cq.data.split(":")
     cid = int(cid)
     c = buscar_cliente_por_id(cid)
     if not c:
         await cq.answer("Cliente não encontrado", show_alert=True); return
 
-    if kind == "cobranca":
-        tpl = ("Olá {nome}! 👋\n"
-               "Lembramos que a fatura do plano {pacote} no valor de {valor} "
-               "vence em {vencimento}. Para manter o serviço ativo, realize o pagamento até a data. "
-               "Qualquer dúvida, estou à disposição. ✅")
-        await cq.message.answer(render_msg(tpl, c))
-        await cq.answer(); return
+    if key == "AUTO":
+        key = compute_key_auto(c.get("vencimento"))
 
-    if kind == "renovacao":
-        tpl = ("Olá {nome}! 👋\n"
-               "Seu plano {pacote} com valor {valor} está com vencimento em {vencimento}. "
-               "Podemos confirmar a renovação? Responda por aqui. 🔁")
-        await cq.message.answer(render_msg(tpl, c))
-        await cq.answer(); return
+    tpl = get_template(key)
+    if not tpl:
+        await cq.answer("Template não encontrado.", show_alert=True); return
 
-    if kind == "perso":
+    text = render_template_text(tpl["body"], c)
+    await cq.message.answer(text)
+    await cq.answer()
+
+# Mensagem personalizada (com variáveis)
+@dp.callback_query(F.data.startswith("msg:"))
+async def cb_msg_personalizada(cq: CallbackQuery, state: FSMContext):
+    # msg:<cid>:perso
+    parts = cq.data.split(":")
+    if len(parts) >= 3 and parts[2] == "perso":
+        cid = int(parts[1])
         await state.update_data(msg_cid=cid)
         await state.set_state(MsgCliente.personalizada)
         await cq.message.answer(
-            "✍️ Digite a mensagem. Você pode usar variáveis: "
-            "<code>{nome}</code>, <code>{pacote}</code>, <code>{valor}</code>, <code>{vencimento}</code>, <code>{telefone}</code>.",
+            "✍️ Digite a mensagem personalizada.\n"
+            "Variáveis: {nome}, {pacote}, {valor}, {vencimento}, {telefone}, {dias_para_vencer}, {dias_atraso}"
         )
-        await cq.answer(); return
+        await cq.answer()
 
 @dp.message(MsgCliente.personalizada)
 async def msg_personalizada(m: Message, state: FSMContext):
     data = await state.get_data()
     cid = data.get("msg_cid")
-    c = buscar_cliente_por_id(int(cid))
+    c = buscar_cliente_por_id(int(cid)) if cid else None
     if not c:
         await state.clear()
         await m.answer("Cliente não encontrado.")
         return
-    text = render_msg(m.text, c)
+    text = render_template_text(m.text, c)
     await state.clear()
     await m.answer(text)
+
+# ---------------------- Comandos utilitários ----------------------
+@dp.message(Command("id"))
+async def cmd_id(m: Message, command: CommandObject):
+    if not command.args or not command.args.strip().isdigit():
+        await m.answer("Uso: <code>/id 123</code>")
+        return
+    cid = int(command.args.strip())
+    c = buscar_cliente_por_id(cid)
+    if not c:
+        await m.answer(f"Cliente #{cid} não encontrado.")
+        return
+    await m.answer("🗂️ Detalhes do cliente:\n\n" + fmt_cliente(c), reply_markup=cliente_actions_kb(cid))
 
 # ---------------------- Cancelar ----------------------
 @dp.message(F.text.casefold() == "❌ cancelar")
