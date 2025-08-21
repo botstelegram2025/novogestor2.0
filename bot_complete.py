@@ -4,7 +4,7 @@ from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, Any, List
 
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -25,12 +25,12 @@ from db import (
     list_templates, get_template, update_template, reset_template
 )
 
-# ================== Config ==================
+# =============== Config ===============
 DUE_SOON_DAYS = 5
 TZ_NAME = os.getenv("TZ", "America/Sao_Paulo")
-WA_API_BASE = os.getenv("WA_API_BASE", "http://localhost:3000")  # Baileys API local
+WA_API_BASE = os.getenv("WA_API_BASE", "http://localhost:3000")
 
-# ================== Estados (FSM) ==================
+# =============== Estados (FSM) ===============
 class CadastroUsuario(StatesGroup):
     nome = State()
     email = State()
@@ -65,7 +65,7 @@ class EditTemplate(StatesGroup):
 class ScheduleWA(StatesGroup):
     waiting_datetime = State()  # dd/mm/aaaa HH:MM
 
-# ================== Helpers ==================
+# =============== Helpers ===============
 def normaliza_tel(v: Optional[str]) -> Optional[str]:
     if not v:
         return None
@@ -166,7 +166,6 @@ def clientes_inline_kb(offset: int, limit: int, total: int, items: List[Dict[str
         nav.append(InlineKeyboardButton(text="Próximos ➡️", callback_data=f"list:page:{next_off}"))
     if nav:
         rows.append(nav)
-    # filtros
     rows.append([
         InlineKeyboardButton(text="🔴 Vencidos/≤3 dias", callback_data="list:filtro:due"),
         InlineKeyboardButton(text="🟢 Todos", callback_data="list:filtro:all")
@@ -281,7 +280,7 @@ def kb_valores() -> ReplyKeyboardMarkup:
         input_field_placeholder="Escolha um valor…"
     )
 
-# ================== Boot ==================
+# =============== Boot ===============
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Defina BOT_TOKEN no ambiente")
@@ -289,7 +288,7 @@ if not BOT_TOKEN:
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# ================== WhatsApp microserviço ==================
+# =============== WhatsApp microserviço ===============
 def wa_format_to_jid(phone: Optional[str]) -> Optional[str]:
     if not phone:
         return None
@@ -298,7 +297,7 @@ def wa_format_to_jid(phone: Optional[str]) -> Optional[str]:
         p = p.lstrip("0")
     if not p.startswith("55") and not (phone or "").startswith("+"):
         p = "55" + p  # ajuste simples para BR
-    return p  # Baileys server converte para JID
+    return p
 
 def wa_send_now(to_phone: str, text: str) -> tuple[bool, str]:
     try:
@@ -347,16 +346,11 @@ def wa_get_qr() -> tuple[bool, Optional[str], Optional[str]]:
 
 def _send_qr_image_to_telegram(m: Message, html_or_dataurl: str):
     if "data:image" in html_or_dataurl:
-        # extrai dataurl do HTML
         _m = re.search(r'src="(data:image/[^"]+)"', html_or_dataurl)
-        if _m:
-            data_url = _m.group(1)
-        else:
-            data_url = html_or_dataurl
+        data_url = _m.group(1) if _m else html_or_dataurl
     else:
         data_url = html_or_dataurl
     if not data_url.startswith("data:image"):
-        # não é dataurl, apenas envia o link
         asyncio.create_task(m.answer(f"Acesse o QR: {WA_API_BASE}/qr"))
         return False
     try:
@@ -368,7 +362,7 @@ def _send_qr_image_to_telegram(m: Message, html_or_dataurl: str):
     asyncio.create_task(m.answer_photo(file, caption="Escaneie este QR no WhatsApp para conectar."))
     return True
 
-# ================== Handlers: Usuário ==================
+# =============== Handlers: Usuário ===============
 @dp.message(Command("start"))
 async def cmd_start(m: Message, state: FSMContext):
     init_db()
@@ -408,7 +402,6 @@ async def cmd_wa(m: Message):
     ])
     await m.answer("📱 Painel WhatsApp", reply_markup=kb)
 
-# Painel WhatsApp botões
 @dp.callback_query(F.data == "wa:status")
 async def wa_status(cq: CallbackQuery):
     ok, health, err = wa_get_health()
@@ -453,13 +446,12 @@ async def wa_logout(cq: CallbackQuery):
         await cq.message.answer("Erro: " + str(e))
     await cq.answer()
 
-# ================== Templates: Gestão (lista -> submenu) ==================
+# =============== Templates (lista -> submenu) ===============
 def templates_main_list_kb() -> InlineKeyboardMarkup:
     items = list_templates()
     rows = []
     for t in items:
-        key = t["key"]
-        title = t["title"]
+        key = t["key"]; title = t["title"]
         rows.append([InlineKeyboardButton(text=f"🧩 {title}", callback_data=f"tpl:open:{key}")])
     rows.append([InlineKeyboardButton(text="⬅️ Voltar", callback_data="tpl:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -550,7 +542,7 @@ async def tpl_receive_body(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("✅ Template atualizado.", reply_markup=template_actions_kb(key))
 
-# ================== Cadastro de usuário ==================
+# =============== Cadastro de usuário ===============
 @dp.message(CadastroUsuario.nome)
 async def cad_nome(m: Message, state: FSMContext):
     nome = m.text.strip()
@@ -581,7 +573,7 @@ async def cad_tel(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("✅ Cadastro concluído! Use os botões abaixo.", reply_markup=kb_main())
 
-# ================== Clientes: cadastro guiado ==================
+# =============== Clientes: cadastro guiado ===============
 @dp.message(F.text.casefold() == "➕ novo cliente")
 async def novo_cliente_start(m: Message, state: FSMContext):
     await m.answer("Vamos cadastrar um cliente.\nQual é o <b>nome</b>?", reply_markup=kb_main())
@@ -684,7 +676,7 @@ async def nc_info(m: Message, state: FSMContext):
     await m.answer(f"✅ Cliente cadastrado com ID <b>#{cid}</b>.\n\n{fmt_cliente(resumo)}",
                    reply_markup=kb_main())
 
-# ================== Listagem Inline e Filtros ==================
+# =============== Listagem Inline e Filtros ===============
 @dp.message(F.text.casefold() == "📋 clientes")
 async def ver_clientes(m: Message):
     limit, offset = 10, 0
@@ -714,7 +706,6 @@ async def cb_list_filter(cq: CallbackQuery):
     limit, offset = 10, 0
     if kind == "due":
         items = listar_clientes_due(days=3, limit=limit, offset=offset)
-        # contar apenas filtrados (opcional); para navegação simples mostramos sem paginação de total específico
         total = len(items)
     else:
         total = contar_clientes()
@@ -722,7 +713,7 @@ async def cb_list_filter(cq: CallbackQuery):
     await cq.message.edit_reply_markup(reply_markup=clientes_inline_kb(offset, limit, total, items))
     await cq.answer()
 
-# ================== Ações do Cliente ==================
+# =============== Ações do Cliente ===============
 @dp.callback_query(F.data.startswith("cli:"))
 async def cb_cli_router(cq: CallbackQuery, state: FSMContext):
     _, cid, action = cq.data.split(":")
@@ -768,7 +759,7 @@ async def cb_del_confirm(cq: CallbackQuery):
     await cq.message.answer(f"🗑️ Cliente #{cid} excluído.", reply_markup=kb_main())
     await cq.answer()
 
-# ================== Editar Cliente ==================
+# =============== Editar Cliente ===============
 @dp.callback_query(F.data.startswith("edit:"))
 async def cb_edit_select(cq: CallbackQuery, state: FSMContext):
     _, cid, campo = cq.data.split(":")
@@ -876,7 +867,7 @@ async def edit_info(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("✅ Informações atualizadas.")
 
-# ================== Renovar Plano ==================
+# =============== Renovar Plano ===============
 PACOTE_TO_MONTHS = {"mensal": 1, "trimestral": 3, "semestral": 6, "anual": 12}
 
 @dp.callback_query(F.data.startswith("renew:"))
@@ -902,7 +893,7 @@ async def cb_renew(cq: CallbackQuery):
     )
     await cq.answer()
 
-# ================== Mensagens (Templates + WhatsApp) ==================
+# =============== Mensagens (Templates + WhatsApp) ===============
 def compute_key_auto(venc) -> str:
     d = to_date(venc)
     if not d:
@@ -994,6 +985,15 @@ async def cb_wa_schedule_ask(cq: CallbackQuery, state: FSMContext):
     await cq.message.answer("🗓️ Informe <b>data e hora</b> (dd/mm/aaaa HH:MM) para agendar o WhatsApp:")
     await cq.answer()
 
+def parse_br_datetime(s: str) -> Optional[datetime]:
+    s = s.strip()
+    try:
+        dt_naive = datetime.strptime(s, "%d/%m/%Y %H:%M")
+        dt_local = dt_naive.replace(tzinfo=ZoneInfo(TZ_NAME))
+        return dt_local
+    except ValueError:
+        return None
+
 @dp.message(ScheduleWA.waiting_datetime)
 async def cb_wa_schedule_set(m: Message, state: FSMContext):
     dt = parse_br_datetime(m.text or "")
@@ -1042,7 +1042,7 @@ async def msg_personalizada(m: Message, state: FSMContext):
     await state.update_data(preview_cid=int(cid), preview_text=text)
     await m.answer("📝 <b>Prévia da mensagem</b>:\n\n" + text, reply_markup=msg_send_options_kb(int(cid)))
 
-# ================== Comando utilitário ==================
+# =============== Comando utilitário ===============
 @dp.message(Command("id"))
 async def cmd_id(m: Message, command: CommandObject):
     if not command.args or not command.args.strip().isdigit():
@@ -1055,7 +1055,7 @@ async def cmd_id(m: Message, command: CommandObject):
         return
     await m.answer("🗂️ Detalhes do cliente:\n\n" + fmt_cliente(c), reply_markup=cliente_actions_kb(cid))
 
-# ================== Cancelar ==================
+# =============== Cancelar ===============
 CANCEL_RE = r"(?i)^(?:/cancel|/stop|❌\s*cancelar|cancelar)$"
 @dp.message(F.text.regexp(CANCEL_RE))
 async def cancelar(m: Message, state: FSMContext):
@@ -1067,7 +1067,7 @@ async def cancelar_btn(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("Operação cancelada.", reply_markup=kb_main())
 
-# ================== Main ==================
+# =============== Main ===============
 async def main():
     token = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
     if not token:
