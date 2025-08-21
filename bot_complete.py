@@ -161,11 +161,51 @@ def trim(text: str, limit: int = 40) -> str:
     text = (text or "").strip()
     return text if len(text) <= limit else (text[:limit-1] + "…")
 
-def clientes_inline_kb(offset: int, limit: int, total: int, items: list[dict]) -> InlineKeyboardMarkup:
+# ------------ Ordenação + Filtros para a lista de clientes ------------
+FILTER_LABELS = {
+    "all": "♻️ Todos",
+    "overdue": "🔴 Vencidos",
+    "soon": "🟡 Próx. 3 dias",
+}
+
+def _sort_clients_by_due(items: list[dict]) -> list[dict]:
+    far_future = date(9999, 12, 31)
+    def key(c: dict):
+        d = to_date(c.get("vencimento")) or far_future
+        return (d, c.get("id", 0))
+    return sorted(items, key=key)
+
+def _apply_filter(items: list[dict], flt: str) -> list[dict]:
+    today = date.today()
+    if flt == "overdue":
+        return [c for c in items if (d := to_date(c.get("vencimento"))) and d < today]
+    if flt == "soon":
+        lim = today + timedelta(days=3)
+        return [c for c in items if (d := to_date(c.get("vencimento"))) and today <= d <= lim]
+    return items  # all
+
+def _get_clients_view(flt: str, offset: int, limit: int) -> tuple[list[dict], int]:
+    # Busca todos e depois filtra/ordena/pagina
+    total = contar_clientes() or 0
+    if total == 0:
+        return [], 0
+    items = listar_clientes(limit=total, offset=0)  # busca tudo
+    items = _apply_filter(_sort_clients_by_due(items), flt)
+    total_filtered = len(items)
+    page_items = items[offset: offset + limit]
+    return page_items, total_filtered
+
+def clientes_inline_kb(offset: int, limit: int, total: int, items: list[dict], current_filter: str) -> InlineKeyboardMarkup:
     rows = []
+    # Barra de filtro (primeira linha)
+    for key in ("all", "overdue", "soon"):
+        selected = "• " if key == current_filter else ""
+        rows.append([InlineKeyboardButton(text=f"{selected}{FILTER_LABELS[key]}", callback_data=f"list:filter:{key}")])
+    # Lista de clientes
     for c in items:
         label = f"{due_dot(c.get('vencimento'))} {trim(c.get('nome','(sem nome)'), 38)} — {fmt_data(c.get('vencimento'))}"
         rows.append([InlineKeyboardButton(text=label, callback_data=f"cli:{c['id']}:view")])
+    # Navegação
     nav = []
     if offset > 0:
         prev_off = max(offset - limit, 0)
@@ -649,26 +689,47 @@ async def nc_info(m: Message, state: FSMContext):
 
 # ---------------------- Listagem Inline e Ações ----------------------
 @dp.message(F.text.casefold() == "📋 clientes")
-async def ver_clientes(m: Message):
+async def ver_clientes(m: Message, state: FSMContext):
     limit, offset = 10, 0
-    total = contar_clientes()
-    items = listar_clientes(limit=limit, offset=offset)
-    if not items:
+    await state.update_data(list_filter="all", list_offset=0)
+    items, total = _get_clients_view("all", offset, limit)
+    if total == 0:
         await m.answer("Ainda não há clientes.", reply_markup=kb_main())
         return
-    await m.answer("📋 <b>Selecione um cliente</b>:", reply_markup=clientes_inline_kb(offset, limit, total, items))
+    await m.answer(
+        "📋 <b>Selecione um cliente</b> (ordenado por vencimento, mais próximo → mais distante):",
+        reply_markup=clientes_inline_kb(offset, limit, total, items, "all")
+    )
+
+@dp.callback_query(F.data.startswith("list:filter:"))
+async def cb_list_filter(cq: CallbackQuery, state: FSMContext):
+    flt = cq.data.split(":")[2]
+    limit = 10
+    offset = 0
+    await state.update_data(list_filter=flt, list_offset=offset)
+    items, total = _get_clients_view(flt, offset, limit)
+    if total == 0:
+        await cq.message.edit_text("Nenhum cliente para este filtro.")
+        await cq.message.edit_reply_markup(reply_markup=clientes_inline_kb(offset, limit, total, [], flt))
+        await cq.answer(); return
+    await cq.message.edit_reply_markup(reply_markup=clientes_inline_kb(offset, limit, total, items, flt))
+    await cq.answer()
 
 @dp.callback_query(F.data.startswith("list:page:"))
-async def cb_list_page(cq: CallbackQuery):
+async def cb_list_page(cq: CallbackQuery, state: FSMContext):
     _, _, off = cq.data.split(":")
     offset = int(off)
     limit = 10
-    total = contar_clientes()
-    items = listar_clientes(limit=limit, offset=offset)
+    data = await state.get_data()
+    flt = data.get("list_filter", "all")
+    await state.update_data(list_offset=offset)
+    items, total = _get_clients_view(flt, offset, limit)
+    # Se a página ficou vazia, volta para a primeira
     if not items and offset != 0:
         offset = 0
-        items = listar_clientes(limit=limit, offset=offset)
-    await cq.message.edit_reply_markup(reply_markup=clientes_inline_kb(offset, limit, total, items))
+        await state.update_data(list_offset=0)
+        items, total = _get_clients_view(flt, offset, limit)
+    await cq.message.edit_reply_markup(reply_markup=clientes_inline_kb(offset, limit, total, items, flt))
     await cq.answer()
 
 @dp.callback_query(F.data.startswith("cli:"))
