@@ -42,8 +42,36 @@ load_dotenv()
 TZ_NAME = os.getenv("TZ", "America/Sao_Paulo")
 
 # Fallback automático para o Baileys local via $PORT se WA_API_BASE não vier das variáveis
+def _validate_port(port_str: str | None) -> int | None:
+    """Valida se a string da porta é um número válido entre 1-65535."""
+    if not port_str:
+        return None
+    try:
+        port = int(port_str)
+        if 1 <= port <= 65535:
+            return port
+        else:
+            print(f"❌ ERRO: PORT={port_str} fora do intervalo válido (1-65535)")
+            return None
+    except ValueError:
+        print(f"❌ ERRO: PORT={port_str} não é um número válido")
+        return None
+
 PORT = os.getenv("PORT")
-WA_API_BASE = os.getenv("WA_API_BASE") or (f"http://127.0.0.1:{PORT}" if PORT else None)
+validated_port = _validate_port(PORT)
+
+if os.getenv("WA_API_BASE"):
+    WA_API_BASE = os.getenv("WA_API_BASE")
+    print(f"ℹ️ WA_API_BASE configurado via variável de ambiente: {WA_API_BASE}")
+elif validated_port:
+    WA_API_BASE = f"http://127.0.0.1:{validated_port}"
+    print(f"ℹ️ WA_API_BASE configurado via fallback PORT: {WA_API_BASE}")
+else:
+    WA_API_BASE = None
+    if PORT:
+        print(f"❌ ERRO: WA_API_BASE não configurado e PORT={PORT} é inválida")
+    else:
+        print("❌ ERRO: WA_API_BASE não configurado e PORT não definida")
 
 # ---------------------- Estados (FSM) ----------------------
 class CadastroUsuario(StatesGroup):
@@ -431,7 +459,7 @@ async def cmd_wa(m: Message):
     if not WA_API_BASE:
         await m.answer(
             "❌ <b>WhatsApp:</b> WA_API_BASE não configurado.\n"
-            "Foi configurado um <b>fallback automático</b> para <code>http://127.0.0.1:$PORT</code> se o Railway definir <code>$PORT</code>.\n"
+            "Foi configurado um <b>fallback automático</b> para <code>http://127.0.0.1:$PORT</code> se o Railway definir uma <code>$PORT</code> válida (1-65535).\n"
             "Se persistir, verifique o <b>supervisord</b> e as variáveis do serviço."
         )
         return
