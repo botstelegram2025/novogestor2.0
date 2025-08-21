@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandObject, StateFilter
+from aiogram.filters import Command, CommandObject, StateFilter, Text
 from aiogram.types import (
     Message,
     ReplyKeyboardMarkup, KeyboardButton,
@@ -300,7 +300,6 @@ bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 # ====================== CANCELAMENTO GLOBAL ======================
-# Atende "❌ Cancelar" ou "/cancel" em QUALQUER ETAPA do fluxo (qualquer estado).
 CANCEL_REGEX = r'(?i)^\s*(?:/cancel|/stop|❌\s*cancelar|cancelar)\s*$'
 
 @dp.message(StateFilter("*"), F.text.regexp(CANCEL_REGEX))
@@ -448,6 +447,11 @@ async def cmd_wa(m: Message):
             _send_qr_image_to_telegram(m, qr["qr"])
         else:
             await m.answer(f"❌ Não consegui obter QR agora. Detalhes: {err2 or 'indisponível'}")
+
+# 🔧 BOTÃO "🟢 WhatsApp" DO TECLADO PERSISTENTE (ROBUSTO E IGNORANDO CAIXA)
+@dp.message(Text(equals=["🟢 WhatsApp", "whatsapp", "WhatsApp", "WA", "wa"], ignore_case=True))
+async def kb_whatsapp_status(m: Message):
+    await cmd_wa(m)
 
 # ---------------------- Templates: Gestão (lista -> submenu) ----------------------
 def templates_main_list_kb() -> InlineKeyboardMarkup:
@@ -1022,7 +1026,7 @@ async def msg_personalizada(m: Message, state: FSMContext):
     await state.update_data(preview_cid=int(cid), preview_text=text)
     await m.answer("📝 <b>Prévia da mensagem</b>:\n\n" + text, reply_markup=msg_send_options_kb(int(cid)))
 
-# ---------------------- Comandos utilitários ----------------------
+# ---------------------- Comando utilitário ----------------------
 @dp.message(Command("id"))
 async def cmd_id(m: Message, command: CommandObject):
     if not command.args or not command.args.strip().isdigit():
@@ -1034,10 +1038,6 @@ async def cmd_id(m: Message, command: CommandObject):
         await m.answer(f"Cliente #{cid} não encontrado.")
         return
     await m.answer("🗂️ Detalhes do cliente:\n\n" + fmt_cliente(c), reply_markup=cliente_actions_kb(cid))
-
-@dp.message(F.text.casefold() == "🟢 whatsapp")
-async def kb_whatsapp_status(m: Message):
-    await cmd_wa(m)
 
 # ---------------------- Main ----------------------
 async def main():
