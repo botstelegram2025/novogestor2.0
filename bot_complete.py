@@ -1,815 +1,728 @@
 # bot_complete.py
 import os
-import logging
-from logging.handlers import RotatingFileHandler
-from datetime import datetime, timedelta, date
+import asyncio
+import re
+from decimal import Decimal, InvalidOperation
+from datetime import datetime, date, timedelta
 
-import requests
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, CommandObject
+from aiogram.types import (
+    Message,
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    CallbackQuery,
 )
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ConversationHandler,
-    ContextTypes,
-    filters,
-)
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from db import (
-    init_db, add_client, get_clients, get_client,
-    update_client_field, delete_client, renew_client,
-    list_templates, get_template_by_offset, set_template,
-    iso_to_human, human_to_iso, status_emoji, render_template, DATE_FMT, HUMAN_FMT,
-    days_until_due
+    init_db,
+    buscar_usuario, inserir_usuario,
+    inserir_cliente, listar_clientes, contar_clientes, buscar_cliente_por_id, deletar_cliente,
+    atualizar_cliente, renovar_vencimento
 )
 
-# ---------------------------
-# LOGGING
-# ---------------------------
-def setup_logging():
-    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-    fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-    datefmt = "%Y-%m-%d %H:%M:%S"
+# ---------------------- Config de Status de Vencimento ----------------------
+DUE_SOON_DAYS = 5  # até 5 dias para vencer -> 🟡
 
-    logger = logging.getLogger()
-    logger.setLevel(getattr(logging, log_level, logging.INFO))
+# ---------------------- Estados (FSM) ----------------------
+class CadastroUsuario(StatesGroup):
+    nome = State()
+    email = State()
+    telefone = State()
 
-    ch = logging.StreamHandler()
-    ch.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
-    logger.addHandler(ch)
+class NovoCliente(StatesGroup):
+    nome = State()
+    telefone = State()
+    pacote = State()
+    pacote_personalizado = State()
+    valor = State()
+    valor_personalizado = State()
+    vencimento = State()
+    info = State()
 
-    fh = RotatingFileHandler("bot.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
-    fh.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
-    logger.addHandler(fh)
+class EditCliente(StatesGroup):
+    aguardando_campo = State()
+    nome = State()
+    telefone = State()
+    pacote = State()
+    pacote_personalizado = State()
+    valor = State()
+    valor_personalizado = State()
+    vencimento = State()
+    info = State()
 
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("telegram").setLevel(logging.INFO)
+class MsgCliente(StatesGroup):
+    personalizada = State()
 
-setup_logging()
-logger = logging.getLogger(__name__)
+# ---------------------- Helpers ----------------------
+def normaliza_tel(v: str | None) -> str | None:
+    if not v:
+        return None
+    return "".join(c for c in v if c.isdigit() or c == "+")
 
-# ---------------------------
-# CONSTS & STATES
-# ---------------------------
-MAIN_BTNS = [["Clientes"], ["Adicionar Cliente"], ["Templates"]]
-
-(
-    ST_ADD_NAME,
-    ST_ADD_PHONE,
-    ST_ADD_PACKAGE,
-    ST_ADD_PRICE,
-    ST_ADD_INFO,
-    ST_ADD_DUE,
-    ST_EDIT_FIELD_SELECT,
-    ST_EDIT_FIELD_INPUT,
-    ST_SEND_MESSAGE_CHOOSE,
-    ST_SEND_MESSAGE_FREE,
-    ST_TEMPLATE_EDIT_LABEL,
-    ST_TEMPLATE_EDIT_CONTENT,
-    ST_RENEW_CHOOSE_DATE,
-    ST_TEMPLATE_NEW_OFFSET,
-    ST_TEMPLATE_NEW_LABEL,
-    ST_TEMPLATE_NEW_CONTENT,
-) = range(16)
-
-EDITABLE_FIELDS = {
-    "name": "Nome",
-    "phone": "Telefone",
-    "package": "Pacote",
-    "price": "Valor (R$)",
-    "info": "Informações",
-    "due_date": "Vencimento (dd/mm/aaaa)",
-}
-
-# ---------------------------
-# WHATSAPP (Baileys) HELPERS
-# ---------------------------
-BAILEYS_URL = os.getenv("BAILEYS_URL", "http://localhost:3000")
-DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY_CODE", "55")
-
-def normalize_msisdn(phone: str) -> str:
-    if not phone:
-        return ""
-    digits = "".join(ch for ch in phone if ch.isdigit())
-    if not digits:
-        return ""
-    if len(digits) >= 12 or digits.startswith(DEFAULT_COUNTRY):
-        return f"+{digits}" if not digits.startswith("+") else digits
-    return f"+{DEFAULT_COUNTRY}{digits}"
-
-def send_whatsapp(to_phone: str, text: str):
+def parse_valor(txt: str) -> Decimal | None:
+    if not txt:
+        return None
+    s = re.sub(r"[^\d,.-]", "", txt).replace(".", "")
+    s = s.replace(",", ".")
     try:
-        if not to_phone:
-            return False, "Telefone vazio"
-        msisdn = normalize_msisdn(to_phone)
-        if not msisdn:
-            return False, "Telefone inválido"
-        url = f"{BAILEYS_URL.rstrip('/')}/send"
-        r = requests.post(url, json={"to": msisdn, "text": text}, timeout=15)
-        if r.ok and r.json().get("ok"):
-            return True, "enviado"
-        return False, f"falha_api: {r.text}"
-    except Exception as e:
-        return False, f"erro_req: {e}"
+        return Decimal(s)
+    except InvalidOperation:
+        return None
 
-async def cmd_whats_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mostra o QR do Baileys dentro do Telegram (se disponível)."""
-    try:
-        r = requests.get(f"{BAILEYS_URL.rstrip('/')}/qr", timeout=10)
-        data = r.json()
-        if data.get("qr_png"):
-            import base64, re
-            b64 = re.sub("^data:image/png;base64,", "", data["qr_png"])
-            img_bytes = base64.b64decode(b64)
-            await update.message.reply_photo(img_bytes, caption="Escaneie para conectar o WhatsApp.")
-        else:
-            await update.message.reply_text("Sem QR no momento (provável que já esteja conectado).")
-    except Exception as e:
-        logger.warning("cmd_whats_qr error: %s", e)
-        await update.message.reply_text(f"Erro ao buscar QR: {e}")
+def parse_vencimento(txt: str):
+    """Retorna date (ou None). Aceita dd/mm/aaaa, dd/mm, aaaa-mm-dd, dd-mm-aaaa."""
+    if not txt:
+        return None
+    txt = txt.strip()
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(txt, fmt).date()
+        except ValueError:
+            pass
+    m = re.match(r"^(\d{1,2})[\/\-](\d{1,2})$", txt)
+    if m:
+        d, mth = map(int, m.groups())
+        try:
+            return datetime(datetime.now().year, mth, d).date()
+        except ValueError:
+            return None
+    return None
 
-# ---------------------------
-# HELPERS GERAIS
-# ---------------------------
-def who(update: Update) -> str:
-    try:
-        if update.effective_user:
-            u = update.effective_user
-            uname = f"@{u.username}" if u.username else f"{u.first_name or ''} {u.last_name or ''}".strip()
-            return f"user_id={u.id} user={uname!s} chat_id={getattr(update.effective_chat,'id',None)}"
-    except Exception:
-        pass
-    return "user=? chat=?"
+def to_date(dv) -> date | None:
+    if not dv:
+        return None
+    if isinstance(dv, date):
+        return dv
+    if isinstance(dv, str):
+        try:
+            return datetime.fromisoformat(dv).date()
+        except ValueError:
+            return None
+    return None
 
-def main_menu_keyboard():
-    return ReplyKeyboardMarkup(MAIN_BTNS, resize_keyboard=True)
+def due_dot(dv) -> str:
+    """
+    🟢 vencimento > hoje + DUE_SOON_DAYS
+    🟡 hoje <= vencimento <= hoje + DUE_SOON_DAYS  (ou sem data)
+    🔴 vencimento < hoje
+    """
+    d = to_date(dv)
+    today = date.today()
+    if d is None:
+        return "🟡"
+    if d < today:
+        return "🔴"
+    if d <= today + timedelta(days=DUE_SOON_DAYS):
+        return "🟡"
+    return "🟢"
 
-def client_button_text(c):
-    return f"{status_emoji(c['due_date'])} {c['name']} - {iso_to_human(c['due_date'])}"
+def fmt_moeda(v) -> str:
+    return f"R$ {float(v):.2f}".replace(".", ",")
 
-def client_menu_kb(client_id):
-    rows = [
-        [InlineKeyboardButton("✏️ Editar", callback_data=f"client:edit:{client_id}")],
-        [InlineKeyboardButton("🔁 Renovar", callback_data=f"client:renewmenu:{client_id}")],
-        [InlineKeyboardButton("💬 Enviar mensagem", callback_data=f"client:send:{client_id}")],
-        [InlineKeyboardButton("🗑️ Excluir", callback_data=f"client:delete:{client_id}")],
-        [InlineKeyboardButton("⬅️ Voltar", callback_data="back:clients")]
-    ]
-    return InlineKeyboardMarkup(rows)
+def fmt_data(dv) -> str:
+    if not dv:
+        return "—"
+    if isinstance(dv, str):
+        try:
+            return datetime.fromisoformat(dv).date().strftime("%d/%m/%Y")
+        except ValueError:
+            return dv
+    if isinstance(dv, date):
+        return dv.strftime("%d/%m/%Y")
+    return str(dv)
 
-def edit_fields_kb(client_id):
+def fmt_cliente(c: dict) -> str:
+    v = fmt_moeda(c["valor"]) if c.get("valor") is not None else "—"
+    venc = fmt_data(c.get("vencimento"))
+    dot = due_dot(c.get("vencimento"))
+    return (
+        f"{dot} <b>#{c['id']}</b> • {c.get('nome','—')}\n"
+        f"📞 {c.get('telefone') or '—'} | 📦 {c.get('pacote') or '—'}\n"
+        f"💰 {v} | 📅 {venc}\n"
+        f"📝 {c.get('info') or '—'}"
+    )
+
+def trim(text: str, limit: int = 40) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else (text[:limit-1] + "…")
+
+def clientes_inline_kb(offset: int, limit: int, total: int, items: list[dict]) -> InlineKeyboardMarkup:
     rows = []
-    for key, label in EDITABLE_FIELDS.items():
-        rows.append([InlineKeyboardButton(f"{label}", callback_data=f"editfield:{client_id}:{key}")])
-    rows.append([InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:open:{client_id}")])
-    return InlineKeyboardMarkup(rows)
+    for c in items:
+        label = f"{due_dot(c.get('vencimento'))} {trim(c.get('nome','(sem nome)'), 38)} — {fmt_data(c.get('vencimento'))}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"cli:{c['id']}:view")])
+    nav = []
+    if offset > 0:
+        prev_off = max(offset - limit, 0)
+        nav.append(InlineKeyboardButton(text="⬅️ Anteriores", callback_data=f"list:page:{prev_off}"))
+    if offset + limit < total:
+        next_off = offset + limit
+        nav.append(InlineKeyboardButton(text="Próximos ➡️", callback_data=f"list:page:{next_off}"))
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def templates_kb():
-    rows = []
-    for t in list_templates():
-        off = t["offset_days"]
-        label = t["label"]
-        rows.append([InlineKeyboardButton(f"{label} ({off:+}d)", callback_data=f"tpl:edit:{off}")])
-    rows.append([InlineKeyboardButton("➕ Novo Template", callback_data="tpl:new")])
-    return InlineKeyboardMarkup(rows)
-
-def send_templates_kb(client_id):
-    rows = []
-    for t in list_templates():
-        off = t["offset_days"]
-        label = t["label"]
-        rows.append([InlineKeyboardButton(f"Usar: {label}", callback_data=f"sendtpl:{client_id}:{off}")])
-    rows.append([InlineKeyboardButton("Mensagem livre", callback_data=f"sendfree:{client_id}")])
-    rows.append([InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:open:{client_id}")])
-    return InlineKeyboardMarkup(rows)
-
-def renew_menu_kb(client_id):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ +1 mês a partir de hoje", callback_data=f"renew:auto:{client_id}")],
-        [InlineKeyboardButton("🗓️ Escolher outra data", callback_data=f"renew:custom:{client_id}")],
-        [InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:open:{client_id}")]
+def cliente_actions_kb(cid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Editar", callback_data=f"cli:{cid}:edit"),
+         InlineKeyboardButton(text="🔁 Renovar", callback_data=f"cli:{cid}:renew")],
+        [InlineKeyboardButton(text="💬 Mensagem", callback_data=f"cli:{cid}:msg"),
+         InlineKeyboardButton(text="🗑️ Excluir", callback_data=f"cli:{cid}:del")],
+        [InlineKeyboardButton(text="⬅️ Voltar à lista", callback_data="list:page:0")]
     ])
 
-def parse_price(text):
-    s = text.replace("R$", "").replace(" ", "").replace(",", ".")
-    return float(s)
+def edit_menu_kb(cid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Nome", callback_data=f"edit:{cid}:nome"),
+         InlineKeyboardButton(text="📞 Telefone", callback_data=f"edit:{cid}:telefone")],
+        [InlineKeyboardButton(text="📦 Pacote", callback_data=f"edit:{cid}:pacote"),
+         InlineKeyboardButton(text="💰 Valor", callback_data=f"edit:{cid}:valor")],
+        [InlineKeyboardButton(text="📝 Informações", callback_data=f"edit:{cid}:info"),
+         InlineKeyboardButton(text="📅 Vencimento", callback_data=f"edit:{cid}:venc")],
+        [InlineKeyboardButton(text="⬅️ Voltar", callback_data=f"cli:{cid}:view")]
+    ])
 
-def add_months(base_date: date, months: int = 1) -> date:
-    y = base_date.year + (base_date.month - 1 + months) // 12
-    m = (base_date.month - 1 + months) % 12 + 1
-    if m == 12:
-        next_month = date(y + 1, 1, 1)
-    else:
-        next_month = date(y, m + 1, 1)
-    last_day = (next_month - timedelta(days=1)).day
-    d = min(base_date.day, last_day)
-    return date(y, m, d)
+def renew_menu_kb(cid: int, pacote: str | None) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Mensal +1M", callback_data=f"renew:{cid}:1"),
+         InlineKeyboardButton(text="Trimestral +3M", callback_data=f"renew:{cid}:3")],
+        [InlineKeyboardButton(text="Semestral +6M", callback_data=f"renew:{cid}:6"),
+         InlineKeyboardButton(text="Anual +12M", callback_data=f"renew:{cid}:12")]
+    ]
+    if pacote and pacote.lower() in {"mensal", "trimestral", "semestral", "anual"}:
+        rows.insert(0, [InlineKeyboardButton(text=f"Usar pacote atual ({pacote})", callback_data=f"renew:{cid}:auto")])
+    rows.append([InlineKeyboardButton(text="⬅️ Voltar", callback_data=f"cli:{cid}:view")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# ---------------------------
-# ERROR HANDLER (GLOBAL)
-# ---------------------------
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.exception("Unhandled exception | %s", who(update if isinstance(update, Update) else Update(update_id=0)))
-    if isinstance(update, Update) and update.effective_message:
-        try:
-            await update.effective_message.reply_text("😬 Ocorreu um erro inesperado. Já registrei nos logs.")
-        except Exception:
-            pass
+def msg_menu_kb(cid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧾 Cobrança", callback_data=f"msg:{cid}:cobranca"),
+         InlineKeyboardButton(text="📦 Renovação", callback_data=f"msg:{cid}:renovacao")],
+        [InlineKeyboardButton(text="✍️ Personalizada", callback_data=f"msg:{cid}:perso")],
+        [InlineKeyboardButton(text="⬅️ Voltar", callback_data=f"cli:{cid}:view")]
+    ])
 
-# ---------------------------
-# COMMANDS
-# ---------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("START | %s", who(update))
-    init_db()
-    await update.message.reply_text(
-        "Bem-vindo ao BOT GESTOR! Escolha uma opção:",
-        reply_markup=main_menu_keyboard(),
+# ---------------------- Teclados de Resposta ----------------------
+def kb_main() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Novo Cliente"), KeyboardButton(text="📋 Clientes")],
+            [KeyboardButton(text="❌ Cancelar")]
+        ],
+        is_persistent=True,
+        resize_keyboard=True,
+        input_field_placeholder="Escolha uma opção…"
     )
 
-async def cmd_run_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Executa o job de envio automático agora (manual)."""
-    await daily_auto_send_job()
-    await update.message.reply_text("Job de envio automático executado.")
+PACOTE_LABELS = ["📅 Mensal", "🗓️ Trimestral", "🗓️ Semestral", "📆 Anual", "🛠️ Personalizado"]
+PACOTE_MAP = {
+    "📅 Mensal": "Mensal",
+    "🗓️ Trimestral": "Trimestral",
+    "🗓️ Semestral": "Semestral",
+    "📆 Anual": "Anual",
+}
+def kb_pacotes() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=PACOTE_LABELS[0]), KeyboardButton(text=PACOTE_LABELS[1])],
+            [KeyboardButton(text=PACOTE_LABELS[2]), KeyboardButton(text=PACOTE_LABELS[3])],
+            [KeyboardButton(text=PACOTE_LABELS[4])],
+            [KeyboardButton(text="❌ Cancelar")]
+        ],
+        is_persistent=True,
+        resize_keyboard=True,
+        input_field_placeholder="Escolha um pacote…"
+    )
 
-async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip()
-    logger.info("MENU | %s | text=%r", who(update), text)
-    low = text.lower()
+VALORES_LABELS = [
+    "💵 25,00", "💵 30,00", "💵 35,00",
+    "💵 40,00", "💵 45,00", "💵 50,00",
+    "💵 60,00", "💵 70,00", "💵 75,00",
+    "💵 90,00", "✍️ Outro valor"
+]
+def kb_valores() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=VALORES_LABELS[0]), KeyboardButton(text=VALORES_LABELS[1]), KeyboardButton(text=VALORES_LABELS[2])],
+            [KeyboardButton(text=VALORES_LABELS[3]), KeyboardButton(text=VALORES_LABELS[4]), KeyboardButton(text=VALORES_LABELS[5])],
+            [KeyboardButton(text=VALORES_LABELS[6]), KeyboardButton(text=VALORES_LABELS[7]), KeyboardButton(text=VALORES_LABELS[8])],
+            [KeyboardButton(text=VALORES_LABELS[9]), KeyboardButton(text=VALORES_LABELS[10])],
+            [KeyboardButton(text="❌ Cancelar")]
+        ],
+        is_persistent=True,
+        resize_keyboard=True,
+        input_field_placeholder="Escolha um valor…"
+    )
 
-    if low == "clientes":
-        return await show_clients(update, context)
-    if low == "adicionar cliente":
-        await update.message.reply_text("Qual o *nome* do cliente?", parse_mode="Markdown")
-        return ST_ADD_NAME
-    if low == "templates":
-        return await show_templates(update, context)
+# ---------------------- Boot ----------------------
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Defina BOT_TOKEN no ambiente")
 
-    await update.message.reply_text("Não entendi. Use o menu 😉", reply_markup=main_menu_keyboard())
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
 
-# ---------------------------
-# CLIENTES - LISTAGEM E AÇÕES
-# ---------------------------
-async def show_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("SHOW_CLIENTS | %s", who(update))
-    clients = get_clients()
-    if not clients:
-        await update.message.reply_text("Nenhum cliente cadastrado ainda.", reply_markup=main_menu_keyboard())
-        return ConversationHandler.END
-
-    buttons = []
-    for c in clients:
-        buttons.append([InlineKeyboardButton(client_button_text(c), callback_data=f"client:open:{c['id']}")])
-
-    await update.message.reply_text("Clientes:", reply_markup=InlineKeyboardMarkup(buttons))
-    return ConversationHandler.END
-
-async def client_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data
-    parts = data.split(":")
-    action = parts[1]
-    client_id = int(parts[2])
-    logger.info("CLIENT_CB | %s | action=%s client_id=%s", who(update), action, client_id)
-
-    c = get_client(client_id)
-    if not c:
-        await q.edit_message_text("Cliente não encontrado.")
-        return ConversationHandler.END
-
-    if action == "open":
-        txt = (
-            f"{status_emoji(c['due_date'])} *{c['name']}*\n"
-            f"Telefone: {c.get('phone') or '-'}\n"
-            f"Pacote: {c.get('package') or '-'}\n"
-            f"Valor: R$ {float(c.get('price') or 0):.2f}\n"
-            f"Vencimento: {iso_to_human(c['due_date'])}\n"
-            f"Info: {c.get('info') or '-'}"
+# ---------------------- Handlers: Usuário ----------------------
+@dp.message(Command("start"))
+async def cmd_start(m: Message, state: FSMContext):
+    user = buscar_usuario(m.from_user.id)
+    if user:
+        await m.answer(
+            f"👋 Olá, {user.get('nome') or m.from_user.first_name}! O que deseja fazer?",
+            reply_markup=kb_main()
         )
-        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=client_menu_kb(client_id))
-        return ConversationHandler.END
+    else:
+        await m.answer(
+            "👋 Bem-vindo! Antes de usar, preciso do seu cadastro.\nQual é o seu <b>nome</b>?",
+            reply_markup=kb_main()
+        )
+        await state.set_state(CadastroUsuario.nome)
+
+@dp.message(Command("help"))
+async def cmd_help(m: Message):
+    await m.answer(
+        "<b>Comandos:</b>\n"
+        "• /start — menu principal\n"
+        "• /help — ajuda\n"
+        "• /id 123 — detalhes do cliente por ID\n"
+        "\nUse o teclado para ➕ Novo Cliente ou 📋 Clientes.",
+        reply_markup=kb_main()
+    )
+
+@dp.message(Command("id"))
+async def cmd_id(m: Message, command: CommandObject):
+    if not command.args or not command.args.strip().isdigit():
+        await m.answer("Uso: <code>/id 123</code>")
+        return
+    cid = int(command.args.strip())
+    c = buscar_cliente_por_id(cid)
+    if not c:
+        await m.answer(f"Cliente #{cid} não encontrado.")
+        return
+    await m.answer("🗂️ Detalhes do cliente:\n\n" + fmt_cliente(c), reply_markup=cliente_actions_kb(cid))
+
+# Cadastro de usuário
+@dp.message(CadastroUsuario.nome)
+async def cad_nome(m: Message, state: FSMContext):
+    nome = m.text.strip()
+    if len(nome) < 2:
+        await m.answer("Nome muito curto. Informe seu <b>nome</b> completo.")
+        return
+    await state.update_data(nome=nome)
+    await m.answer("📧 Agora, seu <b>email</b>:", reply_markup=kb_main())
+    await state.set_state(CadastroUsuario.email)
+
+@dp.message(CadastroUsuario.email)
+async def cad_email(m: Message, state: FSMContext):
+    email = m.text.strip()
+    await state.update_data(email=email)
+    await m.answer("📱 Por fim, seu <b>telefone</b> (com DDD):", reply_markup=kb_main())
+    await state.set_state(CadastroUsuario.telefone)
+
+@dp.message(CadastroUsuario.telefone)
+async def cad_tel(m: Message, state: FSMContext):
+    tel = normaliza_tel(m.text)
+    data = await state.update_data(telefone=tel)
+    inserir_usuario(
+        tg_id=m.from_user.id,
+        nome=data["nome"],
+        email=data["email"],
+        telefone=data["telefone"] or ""
+    )
+    await state.clear()
+    await m.answer("✅ Cadastro concluído! Use os botões abaixo.", reply_markup=kb_main())
+
+# ---------------------- Handlers: Clientes (cadastro guiado) ----------------------
+@dp.message(F.text.casefold() == "➕ novo cliente")
+async def novo_cliente_start(m: Message, state: FSMContext):
+    await m.answer("Vamos cadastrar um cliente.\nQual é o <b>nome</b>?", reply_markup=kb_main())
+    await state.set_state(NovoCliente.nome)
+
+@dp.message(NovoCliente.nome)
+async def nc_nome(m: Message, state: FSMContext):
+    nome = m.text.strip()
+    if len(nome) < 2:
+        await m.answer("Nome muito curto. Informe o <b>nome</b> completo.")
+        return
+    await state.update_data(nome=nome)
+    await m.answer("📞 Informe o <b>telefone</b> (com DDD).", reply_markup=kb_main())
+    await state.set_state(NovoCliente.telefone)
+
+@dp.message(NovoCliente.telefone)
+async def nc_tel(m: Message, state: FSMContext):
+    tel = normaliza_tel(m.text)
+    if tel and (len(tel) < 10 or len(tel) > 16):
+        await m.answer("Telefone inválido. Ex.: +55 11 99999-0000")
+        return
+    await state.update_data(telefone=tel)
+    await m.answer("📦 Escolha um <b>pacote</b> ou toque em Personalizado:", reply_markup=kb_pacotes())
+    await state.set_state(NovoCliente.pacote)
+
+@dp.message(NovoCliente.pacote)
+async def nc_pacote(m: Message, state: FSMContext):
+    txt = (m.text or "").strip()
+    if "personalizado" in txt.lower():
+        await m.answer("🛠️ Digite o <b>nome do pacote</b> desejado:", reply_markup=kb_main())
+        await state.set_state(NovoCliente.pacote_personalizado)
+        return
+    if txt in PACOTE_MAP:
+        await state.update_data(pacote=PACOTE_MAP[txt])
+    else:
+        await state.update_data(pacote=txt if txt else None)
+    await m.answer("💰 Escolha um <b>valor</b> ou toque em Outro valor:", reply_markup=kb_valores())
+    await state.set_state(NovoCliente.valor)
+
+@dp.message(NovoCliente.pacote_personalizado)
+async def nc_pacote_perso(m: Message, state: FSMContext):
+    pacote = m.text.strip()
+    if not pacote:
+        await m.answer("Informe um <b>nome de pacote</b> válido.")
+        return
+    await state.update_data(pacote=pacote)
+    await m.answer("💰 Escolha um <b>valor</b> ou toque em Outro valor:", reply_markup=kb_valores())
+    await state.set_state(NovoCliente.valor)
+
+@dp.message(NovoCliente.valor)
+async def nc_valor(m: Message, state: FSMContext):
+    txt = (m.text or "").strip()
+    if "outro valor" in txt.lower():
+        await m.answer("✍️ Digite o <b>valor</b> (ex.: 89,90):", reply_markup=kb_main())
+        await state.set_state(NovoCliente.valor_personalizado)
+        return
+    valor = parse_valor(txt)
+    if valor is None:
+        await m.answer("Valor inválido. Tente algo como <code>89,90</code> ou escolha um botão.")
+        return
+    await state.update_data(valor=float(valor))
+    await m.answer("📅 Qual é a <b>data de vencimento</b>? (ex.: 10/09/2025 ou 10/09)", reply_markup=kb_main())
+    await state.set_state(NovoCliente.vencimento)
+
+@dp.message(NovoCliente.valor_personalizado)
+async def nc_valor_perso(m: Message, state: FSMContext):
+    valor = parse_valor(m.text)
+    if valor is None:
+        await m.answer("Valor inválido. Ex.: <code>89,90</code>.")
+        return
+    await state.update_data(valor=float(valor))
+    await m.answer("📅 Qual é a <b>data de vencimento</b>? (ex.: 10/09/2025 ou 10/09)", reply_markup=kb_main())
+    await state.set_state(NovoCliente.vencimento)
+
+@dp.message(NovoCliente.vencimento)
+async def nc_venc(m: Message, state: FSMContext):
+    data_v = parse_vencimento(m.text)
+    if data_v is None:
+        await m.answer("Data inválida. Use <code>dd/mm/aaaa</code>, <code>dd/mm</code> ou <code>aaaa-mm-dd</code>.")
+        return
+    await state.update_data(vencimento=data_v.isoformat())
+    await m.answer("📝 Outras informações (MAC, OTP etc.). Se não houver, digite <i>sem</i>.", reply_markup=kb_main())
+    await state.set_state(NovoCliente.info)
+
+@dp.message(NovoCliente.info)
+async def nc_info(m: Message, state: FSMContext):
+    info = (m.text or "").strip()
+    info = None if info.lower() == "sem" else info
+    data = await state.update_data(info=info)
+    cid = inserir_cliente(
+        nome=data.get("nome"),
+        telefone=data.get("telefone"),
+        pacote=data.get("pacote"),
+        valor=data.get("valor"),
+        vencimento=data.get("vencimento"),
+        info=data.get("info"),
+    )
+    await state.clear()
+    resumo = {"id": cid, **data}
+    await m.answer(f"✅ Cliente cadastrado com ID <b>#{cid}</b>.\n\n{fmt_cliente(resumo)}",
+                   reply_markup=kb_main())
+
+# ---------------------- Listagem Inline e Ações ----------------------
+@dp.message(F.text.casefold() == "📋 clientes")
+async def ver_clientes(m: Message):
+    limit, offset = 10, 0
+    total = contar_clientes()
+    items = listar_clientes(limit=limit, offset=offset)
+    if not items:
+        await m.answer("Ainda não há clientes.", reply_markup=kb_main())
+        return
+    await m.answer("📋 <b>Selecione um cliente</b>:", reply_markup=clientes_inline_kb(offset, limit, total, items))
+
+@dp.callback_query(F.data.startswith("list:page:"))
+async def cb_list_page(cq: CallbackQuery):
+    # list:page:<offset>
+    _, _, off = cq.data.split(":")
+    offset = int(off)
+    limit = 10
+    total = contar_clientes()
+    items = listar_clientes(limit=limit, offset=offset)
+    if not items and offset != 0:
+        offset = 0
+        items = listar_clientes(limit=limit, offset=offset)
+    await cq.message.edit_reply_markup(reply_markup=clientes_inline_kb(offset, limit, total, items))
+    await cq.answer()
+
+@dp.callback_query(F.data.startswith("cli:"))
+async def cb_cli_router(cq: CallbackQuery):
+    # cli:<cid>:view|edit|renew|msg|del
+    _, cid, action = cq.data.split(":")
+    cid = int(cid)
+    c = buscar_cliente_por_id(cid)
+    if not c:
+        await cq.answer("Cliente não encontrado", show_alert=True); return
+
+    if action == "view":
+        await cq.message.answer("🗂️ Detalhes do cliente:\n\n" + fmt_cliente(c), reply_markup=cliente_actions_kb(cid))
+        await cq.answer(); return
 
     if action == "edit":
-        await q.edit_message_text("O que deseja editar?", reply_markup=edit_fields_kb(client_id))
-        context.user_data["editing_client_id"] = client_id
-        return ST_EDIT_FIELD_SELECT
+        await cq.message.answer(f"✏️ Editar cliente #{cid}:\n\n{fmt_cliente(c)}", reply_markup=edit_menu_kb(cid))
+        await cq.answer(); return
 
-    if action == "renewmenu":
-        await q.edit_message_text("Como deseja renovar?", reply_markup=renew_menu_kb(client_id))
-        return ConversationHandler.END
-
-    if action == "send":
-        await q.edit_message_text(
-            "Escolha um template ou escreva uma mensagem livre:",
-            reply_markup=send_templates_kb(client_id),
+    if action == "renew":
+        await cq.message.answer(
+            f"🔁 Renovar plano do cliente #{cid}:\n\n{fmt_cliente(c)}",
+            reply_markup=renew_menu_kb(cid, c.get("pacote"))
         )
-        return ST_SEND_MESSAGE_CHOOSE
+        await cq.answer(); return
 
-    if action == "delete":
-        deleted = delete_client(client_id)
-        logger.info("DELETE_CLIENT | client_id=%s deleted=%s", client_id, deleted)
-        if deleted:
-            await q.edit_message_text("Cliente excluído com sucesso.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Voltar", callback_data="back:clients")]]))
-        else:
-            await q.edit_message_text("Não foi possível excluir.")
-        return ConversationHandler.END
+    if action == "msg":
+        await cq.message.answer(
+            f"💬 Mensagem rápida para cliente #{cid} ({c['nome']}):",
+            reply_markup=msg_menu_kb(cid)
+        )
+        await cq.answer(); return
 
-async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    logger.info("BACK | %s | data=%s", who(update), q.data)
-    if q.data == "back:clients":
-        clients = get_clients()
-        if not clients:
-            await q.edit_message_text("Nenhum cliente cadastrado ainda.")
-            return ConversationHandler.END
-        buttons = []
-        for c in clients:
-            buttons.append([InlineKeyboardButton(client_button_text(c), callback_data=f"client:open:{c['id']}")])
-        await q.edit_message_text("Clientes:", reply_markup=InlineKeyboardMarkup(buttons))
-        return ConversationHandler.END
+    if action == "del":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❗ Confirmar exclusão", callback_data=f"delc:{cid}")],
+            [InlineKeyboardButton(text="Cancelar", callback_data=f"cli:{cid}:view")]
+        ])
+        await cq.message.answer(f"Tem certeza que deseja excluir o cliente #{cid}?", reply_markup=kb)
+        await cq.answer(); return
 
-# ---------------------------
-# RENOVAÇÃO (submenu)
-# ---------------------------
-async def renew_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    _, mode, client_id = q.data.split(":")  # renew:auto:ID | renew:custom:ID
-    client_id = int(client_id)
-    logger.info("RENEW | %s | mode=%s client_id=%s", who(update), mode, client_id)
+@dp.callback_query(F.data.startswith("delc:"))
+async def cb_del_confirm(cq: CallbackQuery):
+    cid = int(cq.data.split(":")[1])
+    deletar_cliente(cid)
+    await cq.message.answer(f"🗑️ Cliente #{cid} excluído.", reply_markup=kb_main())
+    await cq.answer()
 
-    c = get_client(client_id)
+# ---------------------- Editar Cliente ----------------------
+@dp.callback_query(F.data.startswith("edit:"))
+async def cb_edit_select(cq: CallbackQuery, state: FSMContext):
+    # edit:<cid>:<campo>
+    _, cid, campo = cq.data.split(":")
+    cid = int(cid)
+    await state.update_data(edit_cid=cid)
+    if campo == "nome":
+        await state.set_state(EditCliente.nome)
+        await cq.message.answer("Informe o <b>novo nome</b>:", reply_markup=kb_main()); await cq.answer(); return
+    if campo == "telefone":
+        await state.set_state(EditCliente.telefone)
+        await cq.message.answer("Informe o <b>novo telefone</b>:", reply_markup=kb_main()); await cq.answer(); return
+    if campo == "pacote":
+        await state.set_state(EditCliente.pacote)
+        await cq.message.answer("Escolha o <b>pacote</b> (ou Personalizado):", reply_markup=kb_pacotes()); await cq.answer(); return
+    if campo == "valor":
+        await state.set_state(EditCliente.valor)
+        await cq.message.answer("Escolha o <b>valor</b> (ou Outro valor):", reply_markup=kb_valores()); await cq.answer(); return
+    if campo == "venc":
+        await state.set_state(EditCliente.vencimento)
+        await cq.message.answer("Informe a <b>nova data de vencimento</b> (dd/mm/aaaa):", reply_markup=kb_main()); await cq.answer(); return
+    if campo == "info":
+        await state.set_state(EditCliente.info)
+        await cq.message.answer("Digite as <b>informações</b> (MAC, OTP etc.):", reply_markup=kb_main()); await cq.answer(); return
+
+@dp.message(EditCliente.nome)
+async def edit_nome(m: Message, state: FSMContext):
+    cid = (await state.get_data()).get("edit_cid")
+    nome = m.text.strip()
+    atualizar_cliente(cid, nome=nome)
+    await state.clear()
+    await m.answer("✅ Nome atualizado.")
+
+@dp.message(EditCliente.telefone)
+async def edit_tel(m: Message, state: FSMContext):
+    cid = (await state.get_data()).get("edit_cid")
+    tel = normaliza_tel(m.text)
+    atualizar_cliente(cid, telefone=tel)
+    await state.clear()
+    await m.answer("✅ Telefone atualizado.")
+
+@dp.message(EditCliente.pacote)
+async def edit_pacote(m: Message, state: FSMContext):
+    cid = (await state.get_data()).get("edit_cid")
+    txt = (m.text or "").strip()
+    if "personalizado" in txt.lower():
+        await state.set_state(EditCliente.pacote_personalizado)
+        await m.answer("🛠️ Digite o <b>nome do pacote</b>:", reply_markup=kb_main())
+        return
+    pacote = PACOTE_MAP.get(txt, txt)
+    atualizar_cliente(cid, pacote=pacote)
+    await state.clear()
+    await m.answer("✅ Pacote atualizado.")
+
+@dp.message(EditCliente.pacote_personalizado)
+async def edit_pacote_perso(m: Message, state: FSMContext):
+    cid = (await state.get_data()).get("edit_cid")
+    pacote = m.text.strip()
+    atualizar_cliente(cid, pacote=pacote)
+    await state.clear()
+    await m.answer("✅ Pacote atualizado.")
+
+@dp.message(EditCliente.valor)
+async def edit_valor(m: Message, state: FSMContext):
+    cid = (await state.get_data()).get("edit_cid")
+    txt = (m.text or "").strip()
+    if "outro valor" in txt.lower():
+        await state.set_state(EditCliente.valor_personalizado)
+        await m.answer("✍️ Digite o <b>valor</b> (ex.: 89,90):", reply_markup=kb_main())
+        return
+    valor = parse_valor(txt)
+    if valor is None:
+        await m.answer("Valor inválido. Escolha um botão ou digite ex.: 89,90.")
+        return
+    atualizar_cliente(cid, valor=float(valor))
+    await state.clear()
+    await m.answer("✅ Valor atualizado.")
+
+@dp.message(EditCliente.valor_personalizado)
+async def edit_valor_perso(m: Message, state: FSMContext):
+    cid = (await state.get_data()).get("edit_cid")
+    valor = parse_valor(m.text)
+    if valor is None:
+        await m.answer("Valor inválido. Ex.: 89,90.")
+        return
+    atualizar_cliente(cid, valor=float(valor))
+    await state.clear()
+    await m.answer("✅ Valor atualizado.")
+
+@dp.message(EditCliente.vencimento)
+async def edit_venc(m: Message, state: FSMContext):
+    cid = (await state.get_data()).get("edit_cid")
+    d = parse_vencimento(m.text)
+    if not d:
+        await m.answer("Data inválida. Use dd/mm/aaaa, dd/mm ou aaaa-mm-dd.")
+        return
+    atualizar_cliente(cid, vencimento=d.isoformat())
+    await state.clear()
+    await m.answer("✅ Vencimento atualizado.")
+
+@dp.message(EditCliente.info)
+async def edit_info(m: Message, state: FSMContext):
+    cid = (await state.get_data()).get("edit_cid")
+    info = (m.text or "").strip()
+    atualizar_cliente(cid, info=None if info.lower() == "sem" else info)
+    await state.clear()
+    await m.answer("✅ Informações atualizadas.")
+
+# ---------------------- Renovar Plano ----------------------
+PACOTE_TO_MONTHS = {"mensal": 1, "trimestral": 3, "semestral": 6, "anual": 12}
+
+@dp.callback_query(F.data.startswith("renew:"))
+async def cb_renew(cq: CallbackQuery):
+    # renew:<cid>:<months|auto>
+    _, cid, opt = cq.data.split(":")
+    cid = int(cid)
+    c = buscar_cliente_por_id(cid)
     if not c:
-        await q.edit_message_text("Cliente não encontrado.")
-        return ConversationHandler.END
+        await cq.answer("Cliente não encontrado", show_alert=True); return
 
-    if mode == "auto":
-        new_due = add_months(date.today(), 1)
-        ok = update_client_field(client_id, "due_date", new_due.strftime(DATE_FMT))
-        logger.info("RENEW_AUTO | client_id=%s ok=%s new_due=%s", client_id, ok, new_due)
-        if ok:
-            await q.edit_message_text(
-                f"Renovado! Novo vencimento: *{new_due.strftime(HUMAN_FMT)}*",
-                parse_mode="Markdown",
-                reply_markup=client_menu_kb(client_id),
-            )
-        else:
-            await q.edit_message_text("Não foi possível renovar.", reply_markup=client_menu_kb(client_id))
-        return ConversationHandler.END
+    if opt == "auto":
+        pacote = (c.get("pacote") or "").lower()
+        months = PACOTE_TO_MONTHS.get(pacote)
+        if not months:
+            await cq.answer("Pacote não reconhecido. Escolha 1/3/6/12 meses.", show_alert=True); return
+    else:
+        months = int(opt)
 
-    if mode == "custom":
-        context.user_data["renew_client_id"] = client_id
-        await q.edit_message_text(
-            f"Informe a nova data de vencimento ({HUMAN_FMT.lower()}):",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:open:{client_id}")]])
-        )
-        return ST_RENEW_CHOOSE_DATE
-
-async def renew_custom_date_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    client_id = context.user_data.get("renew_client_id")
-    logger.info("RENEW_CUSTOM_INPUT | %s | client_id=%s text=%r", who(update), client_id, update.message.text)
-    if not client_id:
-        await update.message.reply_text("Sessão perdida. Abra o cliente novamente.", reply_markup=main_menu_keyboard())
-        return ConversationHandler.END
-    try:
-        new_iso = human_to_iso(update.message.text.strip())
-    except Exception:
-        await update.message.reply_text(f"Data inválida. Use {HUMAN_FMT}.")
-        return ST_RENEW_CHOOSE_DATE
-    ok = update_client_field(client_id, "due_date", new_iso)
-    logger.info("RENEW_CUSTOM_SAVE | client_id=%s ok=%s new_due_iso=%s", client_id, ok, new_iso)
-    if not ok:
-        await update.message.reply_text("Não foi possível atualizar o vencimento.", reply_markup=main_menu_keyboard())
-        return ConversationHandler.END
-
-    await update.message.reply_text(
-        f"Vencimento atualizado para *{iso_to_human(new_iso)}*",
-        parse_mode="Markdown",
-        reply_markup=client_menu_kb(client_id),
+    new_date = renovar_vencimento(cid, months)
+    await cq.message.answer(
+        f"🔁 Renovado!\nCliente: <b>{c['nome']}</b>\nNovo vencimento: <b>{fmt_data(new_date)}</b>",
+        reply_markup=cliente_actions_kb(cid)
     )
-    return ConversationHandler.END
+    await cq.answer()
 
-# ---------------------------
-# EDITAR CAMPOS
-# ---------------------------
-async def editfield_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    _, client_id, field = q.data.split(":")[1:]  # editfield:CID:field
-    client_id = int(client_id)
-    logger.info("EDITFIELD_SELECT | %s | client_id=%s field=%s", who(update), client_id, field)
-
-    context.user_data["editing_client_id"] = client_id
-    context.user_data["editing_field"] = field
-
-    ask = EDITABLE_FIELDS.get(field, "Campo")
-    await q.edit_message_text(
-        f"Informe o novo valor para *{ask}*:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:open:{client_id}")]])
+# ---------------------- Mensagens Rápidas ----------------------
+def render_msg(template: str, c: dict) -> str:
+    valor = fmt_moeda(c["valor"]) if c.get("valor") is not None else "—"
+    venc = fmt_data(c.get("vencimento"))
+    return template.format(
+        nome=c.get("nome", ""),
+        pacote=c.get("pacote", "seu plano"),
+        valor=valor,
+        vencimento=venc,
+        telefone=c.get("telefone", "")
     )
-    return ST_EDIT_FIELD_INPUT
 
-async def editfield_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    client_id = context.user_data.get("editing_client_id")
-    field = context.user_data.get("editing_field")
-    logger.info("EDITFIELD_INPUT | %s | client_id=%s field=%s value=%r", who(update), client_id, field, update.message.text)
-
-    if not client_id or not field:
-        await update.message.reply_text("Sessão de edição perdida. Abra o cliente novamente.", reply_markup=main_menu_keyboard())
-        return ConversationHandler.END
-
-    val = update.message.text.strip()
-    try:
-        if field == "price":
-            val = parse_price(val)
-        if field == "due_date":
-            val = human_to_iso(val)
-        ok = update_client_field(client_id, field, val)
-        if not ok:
-            raise ValueError("Falha ao atualizar")
-    except Exception as e:
-        logger.warning("EDITFIELD_ERROR | client_id=%s field=%s err=%s", client_id, field, e)
-        await update.message.reply_text(f"Valor inválido: {e}")
-        return ST_EDIT_FIELD_INPUT
-
-    c = get_client(client_id)
-    await update.message.reply_text("Atualizado com sucesso!", reply_markup=main_menu_keyboard())
-    txt = (
-        f"{status_emoji(c['due_date'])} *{c['name']}*\n"
-        f"Telefone: {c.get('phone') or '-'}\n"
-        f"Pacote: {c.get('package') or '-'}\n"
-        f"Valor: R$ {float(c.get('price') or 0):.2f}\n"
-        f"Vencimento: {iso_to_human(c['due_date'])}\n"
-        f"Info: {c.get('info') or '-'}"
-    )
-    await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=client_menu_kb(client_id))
-    return ConversationHandler.END
-
-# ---------------------------
-# ENVIAR MENSAGEM (prévia no Telegram)
-# ---------------------------
-async def send_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data
-    parts = data.split(":")
-    action = parts[0]  # sendtpl / sendfree
-    client_id = int(parts[1])
-    logger.info("SEND_CHOOSE | %s | action=%s client_id=%s", who(update), action, client_id)
-
-    c = get_client(client_id)
+@dp.callback_query(F.data.startswith("msg:"))
+async def cb_msg_menu(cq: CallbackQuery, state: FSMContext):
+    # msg:<cid>:cobranca|renovacao|perso
+    _, cid, kind = cq.data.split(":")
+    cid = int(cid)
+    c = buscar_cliente_por_id(cid)
     if not c:
-        await q.edit_message_text("Cliente não encontrado.")
-        return ConversationHandler.END
+        await cq.answer("Cliente não encontrado", show_alert=True); return
 
-    if action == "sendtpl":
-        offset = int(parts[2])
-        tpl = get_template_by_offset(offset)
-        if not tpl:
-            await q.edit_message_text("Template não encontrado.")
-            return ConversationHandler.END
-        msg = render_template(tpl["content"], c, ref_days=offset)
-        await q.edit_message_text(
-            f"*Prévia da mensagem:*\n\n{msg}\n\n*(copie e envie manualmente ao cliente)*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:send:{client_id}")]]),
+    if kind == "cobranca":
+        tpl = ("Olá {nome}! 👋\n"
+               "Lembramos que a fatura do plano {pacote} no valor de {valor} "
+               "vence em {vencimento}. Para manter o serviço ativo, realize o pagamento até a data. "
+               "Qualquer dúvida, estou à disposição. ✅")
+        await cq.message.answer(render_msg(tpl, c))
+        await cq.answer(); return
+
+    if kind == "renovacao":
+        tpl = ("Olá {nome}! 👋\n"
+               "Seu plano {pacote} com valor {valor} está com vencimento em {vencimento}. "
+               "Podemos confirmar a renovação? Responda por aqui. 🔁")
+        await cq.message.answer(render_msg(tpl, c))
+        await cq.answer(); return
+
+    if kind == "perso":
+        await state.update_data(msg_cid=cid)
+        await state.set_state(MsgCliente.personalizada)
+        await cq.message.answer(
+            "✍️ Digite a mensagem. Você pode usar variáveis: "
+            "<code>{nome}</code>, <code>{pacote}</code>, <code>{valor}</code>, <code>{vencimento}</code>, <code>{telefone}</code>.",
         )
-        return ConversationHandler.END
+        await cq.answer(); return
 
-    if action == "sendfree":
-        context.user_data["sending_client_id"] = client_id
-        await q.edit_message_text(
-            "Digite a mensagem que deseja enviar:\n\n"
-            "_Dica: use {nome}, {vencimento}, {valor}, {pacote}, etc._",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:open:{client_id}")]]),
-        )
-        return ST_SEND_MESSAGE_FREE
-
-async def send_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    client_id = context.user_data.get("sending_client_id")
-    logger.info("SEND_FREE_TEXT | %s | client_id=%s text=%r", who(update), client_id, update.message.text)
-    c = get_client(client_id) if client_id else None
+@dp.message(MsgCliente.personalizada)
+async def msg_personalizada(m: Message, state: FSMContext):
+    data = await state.get_data()
+    cid = data.get("msg_cid")
+    c = buscar_cliente_por_id(int(cid))
     if not c:
-        await update.message.reply_text("Cliente não encontrado.")
-        return ConversationHandler.END
-    raw = update.message.text
-    msg = render_template(raw, c)
-    await update.message.reply_text(
-        f"*Prévia da mensagem:*\n\n{msg}\n\n*(copie e envie manualmente ao cliente)*",
-        parse_mode="Markdown",
-        reply_markup=client_menu_kb(client_id),
-    )
-    return ConversationHandler.END
+        await state.clear()
+        await m.answer("Cliente não encontrado.")
+        return
+    text = render_msg(m.text, c)
+    await state.clear()
+    await m.answer(text)
 
-# ---------------------------
-# ADICIONAR CLIENTE (WIZARD)
-# ---------------------------
-async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_client"] = {}
-    context.user_data["new_client"]["name"] = update.message.text.strip()
-    logger.info("ADD_NAME | %s | name=%r", who(update), context.user_data["new_client"]["name"])
-    await update.message.reply_text("Telefone (opcional):")
-    return ST_ADD_PHONE
+# ---------------------- Cancelar ----------------------
+@dp.message(F.text.casefold() == "❌ cancelar")
+async def cancelar(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer("Operação cancelada.", reply_markup=kb_main())
 
-async def add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_client"]["phone"] = update.message.text.strip()
-    logger.info("ADD_PHONE | %s | phone=%r", who(update), context.user_data["new_client"]["phone"])
-    await update.message.reply_text("Pacote (ex: Plano Mensal):")
-    return ST_ADD_PACKAGE
-
-async def add_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_client"]["package"] = update.message.text.strip()
-    logger.info("ADD_PACKAGE | %s | package=%r", who(update), context.user_data["new_client"]["package"])
-    await update.message.reply_text("Valor (ex: 49,90):")
-    return ST_ADD_PRICE
-
-async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        price = update.message.text.strip()
-        context.user_data["new_client"]["price"] = float(price.replace("R$", "").replace(" ", "").replace(",", "."))
-        logger.info("ADD_PRICE | %s | price=%s", who(update), context.user_data["new_client"]["price"])
-    except Exception:
-        logger.warning("ADD_PRICE_INVALID | %s | text=%r", who(update), update.message.text)
-        await update.message.reply_text("Valor inválido. Tente novamente (ex: 49,90).")
-        return ST_ADD_PRICE
-    await update.message.reply_text("Informações adicionais (opcional):")
-    return ST_ADD_INFO
-
-async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_client"]["info"] = update.message.text.strip()
-    logger.info("ADD_INFO | %s | info_len=%d", who(update), len(context.user_data["new_client"]["info"]))
-    await update.message.reply_text(f"Data de vencimento ({HUMAN_FMT.lower()}):")
-    return ST_ADD_DUE
-
-async def add_due(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        due_iso = human_to_iso(update.message.text.strip())
-    except Exception:
-        logger.warning("ADD_DUE_INVALID | %s | text=%r", who(update), update.message.text)
-        await update.message.reply_text(f"Data inválida. Use {HUMAN_FMT}.")
-        return ST_ADD_DUE
-
-    d = context.user_data["new_client"]
-    cid = add_client(
-        name=d.get("name"),
-        phone=d.get("phone"),
-        package=d.get("package"),
-        price=d.get("price"),
-        info=d.get("info"),
-        due_date_iso=due_iso,
-    )
-    logger.info("ADD_CLIENT_DONE | %s | client_id=%s", who(update), cid)
-    await update.message.reply_text(f"Cliente cadastrado! ID: {cid}", reply_markup=main_menu_keyboard())
-    return ConversationHandler.END
-
-# ---------------------------
-# TEMPLATES - LISTAR / EDITAR / CRIAR
-# ---------------------------
-async def show_templates(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("SHOW_TEMPLATES | %s", who(update))
-    tpls = list_templates()
-    if not tpls:
-        await update.message.reply_text("Nenhum template cadastrado.", reply_markup=templates_kb())
-        return ConversationHandler.END
-
-    lines = ["*Templates configurados:*"]
-    for t in tpls:
-        lines.append(f"- {t['label']} ({t['offset_days']:+}d)")
-    lines.append("\nToque para editar ou use ➕ Novo Template.")
-    await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode="Markdown",
-        reply_markup=templates_kb(),
-    )
-    return ConversationHandler.END
-
-async def template_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    parts = q.data.split(":")  # ["tpl","new"] OU ["tpl","edit","OFF"]
-    logger.info("TPL_CHOOSE | %s | data=%s", who(update), q.data)
-
-    # Novo template
-    if len(parts) == 2 and parts[1] == "new":
-        await q.edit_message_text(
-            "Criar novo template\n\n"
-            "1) Envie o *offset em dias* relativo ao vencimento (ex: -2, -1, 0, 1, 30).\n"
-            "_Obs.: cada offset pode ter apenas 1 template._",
-            parse_mode="Markdown"
-        )
-        return ST_TEMPLATE_NEW_OFFSET
-
-    # Editar existente
-    if len(parts) == 3 and parts[1] == "edit":
-        off = int(parts[2])
-        tpl = get_template_by_offset(off)
-        if not tpl:
-            await q.edit_message_text("Template não encontrado.")
-            return ConversationHandler.END
-
-        context.user_data["tpl_offset"] = off
-        context.user_data["tpl_label"] = tpl["label"]
-        context.user_data["tpl_content"] = tpl["content"]
-
-        text = (
-            f"*Editando template:*\n"
-            f"Rótulo: {tpl['label']}\n"
-            f"Offset: {off:+} dias\n\n"
-            f"*Conteúdo atual:*\n{tpl['content']}\n\n"
-            f"_Responda com o novo rótulo (ou envie /pular para manter)._"
-        )
-        await q.edit_message_text(text, parse_mode="Markdown")
-        return ST_TEMPLATE_EDIT_LABEL
-
-    await q.edit_message_text("Ação inválida.")
-    return ConversationHandler.END
-
-async def template_edit_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = update.message.text.strip()
-    if txt != "/pular":
-        context.user_data["tpl_label"] = txt
-    logger.info("TPL_EDIT_LABEL | %s | new_label=%r", who(update), context.user_data.get("tpl_label"))
-    await update.message.reply_text(
-        "Envie o *novo conteúdo* do template.\n\n"
-        "Placeholders disponíveis: {nome}, {telefone}, {pacote}, {valor}, {info}, {vencimento}, {dias}",
-        parse_mode="Markdown",
-    )
-    return ST_TEMPLATE_EDIT_CONTENT
-
-async def template_edit_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    content = update.message.text
-    off = context.user_data.get("tpl_offset")
-    label = context.user_data.get("tpl_label")
-    logger.info("TPL_EDIT_CONTENT | %s | off=%s label=%r", who(update), off, label)
-    if off is None or not label:
-        await update.message.reply_text("Sessão perdida. Abra os templates novamente.", reply_markup=main_menu_keyboard())
-        return ConversationHandler.END
-
-    set_template(off, label, content)
-    await update.message.reply_text("Template atualizado!", reply_markup=main_menu_keyboard())
-    return ConversationHandler.END
-
-# Novo Template (wizard)
-async def template_new_offset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = update.message.text.strip()
-    try:
-        off = int(txt)
-    except ValueError:
-        logger.warning("TPL_NEW_OFFSET_INVALID | %s | text=%r", who(update), txt)
-        await update.message.reply_text("Offset inválido. Envie um número inteiro (ex: -2, 0, 1, 30).")
-        return ST_TEMPLATE_NEW_OFFSET
-    context.user_data["new_tpl_offset"] = off
-    logger.info("TPL_NEW_OFFSET | %s | off=%s", who(update), off)
-    await update.message.reply_text(
-        'Agora envie o *rótulo* (ex: "2 dias antes", "No dia", "Agradecimento").',
-        parse_mode="Markdown"
-    )
-    return ST_TEMPLATE_NEW_LABEL
-
-async def template_new_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_tpl_label"] = update.message.text.strip()
-    logger.info("TPL_NEW_LABEL | %s | label=%r", who(update), context.user_data["new_tpl_label"])
-    await update.message.reply_text(
-        "Por fim, envie o *conteúdo* do template.\n\n"
-        "Dica: use variáveis como {nome}, {telefone}, {pacote}, {valor}, {info}, {vencimento}, {dias}",
-        parse_mode="Markdown"
-    )
-    return ST_TEMPLATE_NEW_CONTENT
-
-async def template_new_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    content = update.message.text
-    off = context.user_data.get("new_tpl_offset")
-    label = context.user_data.get("new_tpl_label")
-    logger.info("TPL_NEW_SAVE | %s | off=%s label=%r", who(update), off, label)
-    if off is None or not label:
-        await update.message.reply_text("Sessão perdida. Abra os templates novamente.", reply_markup=main_menu_keyboard())
-        return ConversationHandler.END
-
-    set_template(off, label, content)
-    await update.message.reply_text("Novo template salvo!", reply_markup=main_menu_keyboard())
-    return ConversationHandler.END
-
-# ---------------------------
-# AUTO SEND (cron diário)
-# ---------------------------
-def pick_template_for_client(c: dict):
-    di = days_until_due(c["due_date"])
-    if di is None:
-        return None, None
-    tpl = get_template_by_offset(di)
-    return tpl, di
-
-async def daily_auto_send_job(app_context: ContextTypes.DEFAULT_TYPE = None):
-    from db import get_clients, render_template
-    clients = get_clients()
-    sent, skipped = 0, 0
-
-    for c in clients:
-        tpl, di = pick_template_for_client(c)
-        if not tpl:
-            skipped += 1
-            logger.debug("AUTO_SEND skip | id=%s name=%r di=%s", c["id"], c["name"], di)
-            continue
-        msg = render_template(tpl["content"], c, ref_days=di)
-        ok, info = send_whatsapp(c.get("phone", ""), msg)
-        logger.info(
-            "AUTO_SEND | client_id=%s name=%r phone=%r di=%s tpl=%r ok=%s info=%s",
-            c["id"], c["name"], c.get("phone"), di, tpl["label"], ok, info
-        )
-        if ok:
-            sent += 1
-    logger.info("AUTO_SEND SUMMARY | sent=%s skipped=%s total=%s", sent, skipped, len(clients))
-
-def setup_scheduler(application):
-    hour = int(os.getenv("AUTO_SEND_HOUR", "9"))
-    tz = ZoneInfo("America/Sao_Paulo")
-    scheduler = AsyncIOScheduler(timezone=tz)
-    scheduler.add_job(
-        daily_auto_send_job,
-        "cron",
-        hour=hour,
-        minute=0,
-        id="daily_auto_send",
-        replace_existing=True
-    )
-    scheduler.start()
-    logger.info("Scheduler iniciado | daily_auto_send @ %02d:00 America/Sao_Paulo", hour)
-
-# ---------------------------
-# APP
-# ---------------------------
-def build_application():
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise RuntimeError("Defina a variável de ambiente TELEGRAM_BOT_TOKEN com o token do seu bot.")
-
-    app = ApplicationBuilder().token(token).build()
-    app.add_error_handler(error_handler)
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("whats_qr", cmd_whats_qr))
-    app.add_handler(CommandHandler("run_auto", cmd_run_auto))  # disparo manual
-
-    # Menu principal por texto
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
-
-    # Callbacks genéricos
-    app.add_handler(CallbackQueryHandler(client_callback, pattern=r"^client:(open|edit|renewmenu|send|delete):"))
-    app.add_handler(CallbackQueryHandler(back_callback, pattern=r"^back:clients$"))
-    app.add_handler(CallbackQueryHandler(editfield_select, pattern=r"^editfield:\d+:(name|phone|package|price|info|due_date)$"))
-    app.add_handler(CallbackQueryHandler(send_choose, pattern=r"^(sendtpl|sendfree):\d+"))
-    app.add_handler(CallbackQueryHandler(renew_callback, pattern=r"^renew:(auto|custom):\d+$"))
-    # aceitar "tpl:new" OU "tpl:edit:-?\d+"
-    app.add_handler(CallbackQueryHandler(template_choose, pattern=r"^tpl:(?:new|edit:-?\d+)$"))
-
-    conv = ConversationHandler(
-        entry_points=[],
-        states={
-            ST_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
-            ST_ADD_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone)],
-            ST_ADD_PACKAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_package)],
-            ST_ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_price)],
-            ST_ADD_INFO: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_info)],
-            ST_ADD_DUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_due)],
-
-            ST_EDIT_FIELD_SELECT: [CallbackQueryHandler(editfield_select, pattern=r"^editfield:\d+:(name|phone|package|price|info|due_date)$")],
-            ST_EDIT_FIELD_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, editfield_input)],
-
-            ST_SEND_MESSAGE_CHOOSE: [CallbackQueryHandler(send_choose, pattern=r"^(sendtpl|sendfree):\d+")],
-            ST_SEND_MESSAGE_FREE: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_free_text)],
-
-            ST_RENEW_CHOOSE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, renew_custom_date_input)],
-
-            ST_TEMPLATE_EDIT_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, template_edit_label)],
-            ST_TEMPLATE_EDIT_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, template_edit_content)],
-
-            ST_TEMPLATE_NEW_OFFSET: [MessageHandler(filters.TEXT & ~filters.COMMAND, template_new_offset)],
-            ST_TEMPLATE_NEW_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, template_new_label)],
-            ST_TEMPLATE_NEW_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, template_new_content)],
-        },
-        fallbacks=[],
-        per_user=True,
-        per_chat=True,
-    )
-    app.add_handler(conv)
-    return app
+# ---------------------- Main ----------------------
+async def main():
+    print("🚀 iniciando… limpando webhook e preparando DB")
+    await bot.delete_webhook(drop_pending_updates=True)
+    init_db()
+    print("✅ pronto. iniciando polling…")
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":
-    init_db()
-    application = build_application()
-    setup_scheduler(application)
-    logger.info("BOT GESTOR iniciado. Versão de PTB compatível (>=20).")
-    application.run_polling()
+    asyncio.run(main())
