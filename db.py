@@ -10,7 +10,7 @@ if not DATABASE_URL:
     raise RuntimeError("Defina DATABASE_URL nas variáveis de ambiente")
 
 def connect():
-    # Se precisar SSL forçado: acrescente ?sslmode=require à URL (Railway geralmente aceita sem)
+    # Se precisar SSL forçado: acrescente ?sslmode=require à URL
     return psycopg2.connect(DATABASE_URL)
 
 # ----------------- Templates (defaults) -----------------
