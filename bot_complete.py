@@ -85,13 +85,38 @@ def kb_main():
         is_persistent=True
     )
 
+def kb_package():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="MENSAL"), KeyboardButton(text="TRIMESTRAL")],
+            [KeyboardButton(text="SEMESTRAL"), KeyboardButton(text="ANUAL")],
+            [KeyboardButton(text="Outro pacote")]
+        ],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
+def kb_value():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="25,00"), KeyboardButton(text="30,00"), KeyboardButton(text="35,00")],
+            [KeyboardButton(text="40,00"), KeyboardButton(text="45,00"), KeyboardButton(text="60,00")],
+            [KeyboardButton(text="70,00"), KeyboardButton(text="75,00"), KeyboardButton(text="90,00")],
+            [KeyboardButton(text="Outro valor")]
+        ],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
 # ------------- Estados -------------
 class NovoCliente(StatesGroup):
     nome = State()
     telefone = State()
-    email = State()
+    # email = State()  # Removido conforme solicitação
     pacote = State()
+    pacote_outro = State()  # Para "Outro pacote"
     valor = State()
+    valor_outro = State()  # Para "Outro valor"
     vencimento = State()
     info = State()
 
@@ -153,31 +178,62 @@ async def nc_nome(m: types.Message, state: FSMContext):
 async def nc_tel(m: types.Message, state: FSMContext):
     tel = normaliza_tel(m.text)
     await state.update_data(telefone=tel)
-    await state.set_state(NovoCliente.email)
-    await m.answer("📧 Email (pode deixar em branco):")
-
-@dp.message(NovoCliente.email)
-async def nc_email(m: types.Message, state: FSMContext):
-    email = (m.text or "").strip()
-    await state.update_data(email=email if email else None)
     await state.set_state(NovoCliente.pacote)
-    await m.answer("📦 Pacote (Mensal/Trimestral/Semestral/Anual/Outro):")
+    await m.answer("📦 Escolha o pacote:", reply_markup=kb_package())
 
 @dp.message(NovoCliente.pacote)
 async def nc_pac(m: types.Message, state: FSMContext):
-    await state.update_data(pacote=(m.text or "").strip() or None)
+    text = (m.text or "").strip()
+    if text == "Outro pacote":
+        await state.set_state(NovoCliente.pacote_outro)
+        await m.answer("📦 Digite o nome do pacote:", reply_markup=kb_main())
+        return
+    # Se é uma das opções padrão
+    if text in ["MENSAL", "TRIMESTRAL", "SEMESTRAL", "ANUAL"]:
+        await state.update_data(pacote=text)
+        await state.set_state(NovoCliente.valor)
+        await m.answer("💰 Escolha o valor:", reply_markup=kb_value())
+    else:
+        await m.answer("Por favor, escolha uma das opções do teclado:", reply_markup=kb_package())
+
+@dp.message(NovoCliente.pacote_outro)
+async def nc_pac_outro(m: types.Message, state: FSMContext):
+    pacote = (m.text or "").strip()
+    if not pacote:
+        await m.answer("Por favor, digite o nome do pacote:")
+        return
+    await state.update_data(pacote=pacote)
     await state.set_state(NovoCliente.valor)
-    await m.answer("💰 Valor (ex.: 49,90):")
+    await m.answer("💰 Escolha o valor:", reply_markup=kb_value())
 
 @dp.message(NovoCliente.valor)
 async def nc_valor(m: types.Message, state: FSMContext):
+    text = (m.text or "").strip()
+    if text == "Outro valor":
+        await state.set_state(NovoCliente.valor_outro)
+        await m.answer("💰 Digite o valor (ex.: 49,90):", reply_markup=kb_main())
+        return
+    # Se é uma das opções padrão, verifica se é um valor válido
+    if text in ["25,00", "30,00", "35,00", "40,00", "45,00", "60,00", "70,00", "75,00", "90,00"]:
+        v = parse_valor(text)
+        if v is not None:
+            await state.update_data(valor=v)
+            await state.set_state(NovoCliente.vencimento)
+            await m.answer("📅 Vencimento (dd/mm/aaaa ou dd/mm):", reply_markup=kb_main())
+            return
+    
+    # Se não é uma opção válida, pede para escolher do teclado
+    await m.answer("Por favor, escolha uma das opções do teclado:", reply_markup=kb_value())
+
+@dp.message(NovoCliente.valor_outro)
+async def nc_valor_outro(m: types.Message, state: FSMContext):
     v = parse_valor(m.text or "")
     if v is None:
         await m.answer("Valor inválido. Ex.: 49,90")
         return
     await state.update_data(valor=v)
     await state.set_state(NovoCliente.vencimento)
-    await m.answer("📅 Vencimento (dd/mm/aaaa ou dd/mm):")
+    await m.answer("📅 Vencimento (dd/mm/aaaa ou dd/mm):", reply_markup=kb_main())
 
 @dp.message(NovoCliente.vencimento)
 async def nc_venc(m: types.Message, state: FSMContext):
@@ -198,7 +254,7 @@ async def nc_info(m: types.Message, state: FSMContext):
     cid = db.add_client(
         name=data.get("nome"),
         phone=data.get("telefone"),
-        email=data.get("email"),
+        email=None,  # Email removido do fluxo
         package=data.get("pacote"),
         value=data.get("valor"),
         due_date=data.get("vencimento"),
