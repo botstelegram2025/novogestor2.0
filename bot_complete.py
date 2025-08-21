@@ -4,6 +4,10 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta, date
 
+import requests
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from zoneinfo import ZoneInfo
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -24,29 +28,25 @@ from db import (
     init_db, add_client, get_clients, get_client,
     update_client_field, delete_client, renew_client,
     list_templates, get_template_by_offset, set_template,
-    iso_to_human, human_to_iso, status_emoji, render_template, DATE_FMT, HUMAN_FMT
+    iso_to_human, human_to_iso, status_emoji, render_template, DATE_FMT, HUMAN_FMT,
+    days_until_due
 )
-
 
 # ---------------------------
 # LOGGING
 # ---------------------------
 def setup_logging():
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-
-    # Formato: 2025-08-20 20:31:00 | INFO | bot_complete | mensagem...
     fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
 
     logger = logging.getLogger()
     logger.setLevel(getattr(logging, log_level, logging.INFO))
 
-    # Console
     ch = logging.StreamHandler()
     ch.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
     logger.addHandler(ch)
 
-    # Arquivo com rotação
     fh = RotatingFileHandler("bot.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
     fh.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
     logger.addHandler(fh)
@@ -54,10 +54,8 @@ def setup_logging():
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.INFO)
 
-
 setup_logging()
 logger = logging.getLogger(__name__)
-
 
 # ---------------------------
 # CONSTS & STATES
@@ -92,12 +90,57 @@ EDITABLE_FIELDS = {
     "due_date": "Vencimento (dd/mm/aaaa)",
 }
 
+# ---------------------------
+# WHATSAPP (Baileys) HELPERS
+# ---------------------------
+BAILEYS_URL = os.getenv("BAILEYS_URL", "http://localhost:3000")
+DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY_CODE", "55")
+
+def normalize_msisdn(phone: str) -> str:
+    if not phone:
+        return ""
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if not digits:
+        return ""
+    if len(digits) >= 12 or digits.startswith(DEFAULT_COUNTRY):
+        return f"+{digits}" if not digits.startswith("+") else digits
+    return f"+{DEFAULT_COUNTRY}{digits}"
+
+def send_whatsapp(to_phone: str, text: str):
+    try:
+        if not to_phone:
+            return False, "Telefone vazio"
+        msisdn = normalize_msisdn(to_phone)
+        if not msisdn:
+            return False, "Telefone inválido"
+        url = f"{BAILEYS_URL.rstrip('/')}/send"
+        r = requests.post(url, json={"to": msisdn, "text": text}, timeout=15)
+        if r.ok and r.json().get("ok"):
+            return True, "enviado"
+        return False, f"falha_api: {r.text}"
+    except Exception as e:
+        return False, f"erro_req: {e}"
+
+async def cmd_whats_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra o QR do Baileys dentro do Telegram (se disponível)."""
+    try:
+        r = requests.get(f"{BAILEYS_URL.rstrip('/')}/qr", timeout=10)
+        data = r.json()
+        if data.get("qr_png"):
+            import base64, re
+            b64 = re.sub("^data:image/png;base64,", "", data["qr_png"])
+            img_bytes = base64.b64decode(b64)
+            await update.message.reply_photo(img_bytes, caption="Escaneie para conectar o WhatsApp.")
+        else:
+            await update.message.reply_text("Sem QR no momento (provável que já esteja conectado).")
+    except Exception as e:
+        logger.warning("cmd_whats_qr error: %s", e)
+        await update.message.reply_text(f"Erro ao buscar QR: {e}")
 
 # ---------------------------
-# HELPERS
+# HELPERS GERAIS
 # ---------------------------
 def who(update: Update) -> str:
-    """Retorna string curta com info de usuário/chat para log."""
     try:
         if update.effective_user:
             u = update.effective_user
@@ -107,14 +150,11 @@ def who(update: Update) -> str:
         pass
     return "user=? chat=?"
 
-
 def main_menu_keyboard():
     return ReplyKeyboardMarkup(MAIN_BTNS, resize_keyboard=True)
 
-
 def client_button_text(c):
     return f"{status_emoji(c['due_date'])} {c['name']} - {iso_to_human(c['due_date'])}"
-
 
 def client_menu_kb(client_id):
     rows = [
@@ -126,14 +166,12 @@ def client_menu_kb(client_id):
     ]
     return InlineKeyboardMarkup(rows)
 
-
 def edit_fields_kb(client_id):
     rows = []
     for key, label in EDITABLE_FIELDS.items():
         rows.append([InlineKeyboardButton(f"{label}", callback_data=f"editfield:{client_id}:{key}")])
     rows.append([InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:open:{client_id}")])
     return InlineKeyboardMarkup(rows)
-
 
 def templates_kb():
     rows = []
@@ -143,7 +181,6 @@ def templates_kb():
         rows.append([InlineKeyboardButton(f"{label} ({off:+}d)", callback_data=f"tpl:edit:{off}")])
     rows.append([InlineKeyboardButton("➕ Novo Template", callback_data="tpl:new")])
     return InlineKeyboardMarkup(rows)
-
 
 def send_templates_kb(client_id):
     rows = []
@@ -155,7 +192,6 @@ def send_templates_kb(client_id):
     rows.append([InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:open:{client_id}")])
     return InlineKeyboardMarkup(rows)
 
-
 def renew_menu_kb(client_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⚡ +1 mês a partir de hoje", callback_data=f"renew:auto:{client_id}")],
@@ -163,17 +199,13 @@ def renew_menu_kb(client_id):
         [InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:open:{client_id}")]
     ])
 
-
 def parse_price(text):
     s = text.replace("R$", "").replace(" ", "").replace(",", ".")
     return float(s)
 
-
-# Util: somar meses (respeitando final de mês)
 def add_months(base_date: date, months: int = 1) -> date:
     y = base_date.year + (base_date.month - 1 + months) // 12
     m = (base_date.month - 1 + months) % 12 + 1
-    # último dia do mês destino
     if m == 12:
         next_month = date(y + 1, 1, 1)
     else:
@@ -182,19 +214,16 @@ def add_months(base_date: date, months: int = 1) -> date:
     d = min(base_date.day, last_day)
     return date(y, m, d)
 
-
 # ---------------------------
 # ERROR HANDLER (GLOBAL)
 # ---------------------------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled exception | %s", who(update if isinstance(update, Update) else Update(update_id=0)))
-    # resposta discreta ao usuário (sem vazar stack)
     if isinstance(update, Update) and update.effective_message:
         try:
             await update.effective_message.reply_text("😬 Ocorreu um erro inesperado. Já registrei nos logs.")
         except Exception:
             pass
-
 
 # ---------------------------
 # COMMANDS
@@ -207,6 +236,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_menu_keyboard(),
     )
 
+async def cmd_run_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Executa o job de envio automático agora (manual)."""
+    await daily_auto_send_job()
+    await update.message.reply_text("Job de envio automático executado.")
 
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
@@ -222,7 +255,6 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_templates(update, context)
 
     await update.message.reply_text("Não entendi. Use o menu 😉", reply_markup=main_menu_keyboard())
-
 
 # ---------------------------
 # CLIENTES - LISTAGEM E AÇÕES
@@ -241,11 +273,10 @@ async def show_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Clientes:", reply_markup=InlineKeyboardMarkup(buttons))
     return ConversationHandler.END
 
-
 async def client_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    data = q.data  # e.g. client:open:ID
+    data = q.data
     parts = data.split(":")
     action = parts[1]
     client_id = int(parts[2])
@@ -293,7 +324,6 @@ async def client_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Não foi possível excluir.")
         return ConversationHandler.END
 
-
 async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -308,7 +338,6 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append([InlineKeyboardButton(client_button_text(c), callback_data=f"client:open:{c['id']}")])
         await q.edit_message_text("Clientes:", reply_markup=InlineKeyboardMarkup(buttons))
         return ConversationHandler.END
-
 
 # ---------------------------
 # RENOVAÇÃO (submenu)
@@ -347,7 +376,6 @@ async def renew_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_RENEW_CHOOSE_DATE
 
-
 async def renew_custom_date_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client_id = context.user_data.get("renew_client_id")
     logger.info("RENEW_CUSTOM_INPUT | %s | client_id=%s text=%r", who(update), client_id, update.message.text)
@@ -372,7 +400,6 @@ async def renew_custom_date_input(update: Update, context: ContextTypes.DEFAULT_
     )
     return ConversationHandler.END
 
-
 # ---------------------------
 # EDITAR CAMPOS
 # ---------------------------
@@ -393,7 +420,6 @@ async def editfield_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Voltar", callback_data=f"client:open:{client_id}")]])
     )
     return ST_EDIT_FIELD_INPUT
-
 
 async def editfield_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client_id = context.user_data.get("editing_client_id")
@@ -431,9 +457,8 @@ async def editfield_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=client_menu_kb(client_id))
     return ConversationHandler.END
 
-
 # ---------------------------
-# ENVIAR MENSAGEM
+# ENVIAR MENSAGEM (prévia no Telegram)
 # ---------------------------
 async def send_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -473,7 +498,6 @@ async def send_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_SEND_MESSAGE_FREE
 
-
 async def send_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client_id = context.user_data.get("sending_client_id")
     logger.info("SEND_FREE_TEXT | %s | client_id=%s text=%r", who(update), client_id, update.message.text)
@@ -490,7 +514,6 @@ async def send_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-
 # ---------------------------
 # ADICIONAR CLIENTE (WIZARD)
 # ---------------------------
@@ -501,20 +524,17 @@ async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Telefone (opcional):")
     return ST_ADD_PHONE
 
-
 async def add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_client"]["phone"] = update.message.text.strip()
     logger.info("ADD_PHONE | %s | phone=%r", who(update), context.user_data["new_client"]["phone"])
     await update.message.reply_text("Pacote (ex: Plano Mensal):")
     return ST_ADD_PACKAGE
 
-
 async def add_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_client"]["package"] = update.message.text.strip()
     logger.info("ADD_PACKAGE | %s | package=%r", who(update), context.user_data["new_client"]["package"])
     await update.message.reply_text("Valor (ex: 49,90):")
     return ST_ADD_PRICE
-
 
 async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -528,13 +548,11 @@ async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Informações adicionais (opcional):")
     return ST_ADD_INFO
 
-
 async def add_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_client"]["info"] = update.message.text.strip()
     logger.info("ADD_INFO | %s | info_len=%d", who(update), len(context.user_data["new_client"]["info"]))
     await update.message.reply_text(f"Data de vencimento ({HUMAN_FMT.lower()}):")
     return ST_ADD_DUE
-
 
 async def add_due(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -557,7 +575,6 @@ async def add_due(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Cliente cadastrado! ID: {cid}", reply_markup=main_menu_keyboard())
     return ConversationHandler.END
 
-
 # ---------------------------
 # TEMPLATES - LISTAR / EDITAR / CRIAR
 # ---------------------------
@@ -578,7 +595,6 @@ async def show_templates(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=templates_kb(),
     )
     return ConversationHandler.END
-
 
 async def template_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -621,7 +637,6 @@ async def template_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text("Ação inválida.")
     return ConversationHandler.END
 
-
 async def template_edit_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     if txt != "/pular":
@@ -633,7 +648,6 @@ async def template_edit_label(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode="Markdown",
     )
     return ST_TEMPLATE_EDIT_CONTENT
-
 
 async def template_edit_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     content = update.message.text
@@ -647,7 +661,6 @@ async def template_edit_content(update: Update, context: ContextTypes.DEFAULT_TY
     set_template(off, label, content)
     await update.message.reply_text("Template atualizado!", reply_markup=main_menu_keyboard())
     return ConversationHandler.END
-
 
 # Novo Template (wizard)
 async def template_new_offset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -666,7 +679,6 @@ async def template_new_offset(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     return ST_TEMPLATE_NEW_LABEL
 
-
 async def template_new_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_tpl_label"] = update.message.text.strip()
     logger.info("TPL_NEW_LABEL | %s | label=%r", who(update), context.user_data["new_tpl_label"])
@@ -677,7 +689,6 @@ async def template_new_label(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return ST_TEMPLATE_NEW_CONTENT
 
-
 async def template_new_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     content = update.message.text
     off = context.user_data.get("new_tpl_offset")
@@ -687,11 +698,55 @@ async def template_new_content(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Sessão perdida. Abra os templates novamente.", reply_markup=main_menu_keyboard())
         return ConversationHandler.END
 
-    # Se já existir template nesse offset, substitui (regra do schema atual: UNIQUE(offset_days))
     set_template(off, label, content)
     await update.message.reply_text("Novo template salvo!", reply_markup=main_menu_keyboard())
     return ConversationHandler.END
 
+# ---------------------------
+# AUTO SEND (cron diário)
+# ---------------------------
+def pick_template_for_client(c: dict):
+    di = days_until_due(c["due_date"])
+    if di is None:
+        return None, None
+    tpl = get_template_by_offset(di)
+    return tpl, di
+
+async def daily_auto_send_job(app_context: ContextTypes.DEFAULT_TYPE = None):
+    from db import get_clients, render_template
+    clients = get_clients()
+    sent, skipped = 0, 0
+
+    for c in clients:
+        tpl, di = pick_template_for_client(c)
+        if not tpl:
+            skipped += 1
+            logger.debug("AUTO_SEND skip | id=%s name=%r di=%s", c["id"], c["name"], di)
+            continue
+        msg = render_template(tpl["content"], c, ref_days=di)
+        ok, info = send_whatsapp(c.get("phone", ""), msg)
+        logger.info(
+            "AUTO_SEND | client_id=%s name=%r phone=%r di=%s tpl=%r ok=%s info=%s",
+            c["id"], c["name"], c.get("phone"), di, tpl["label"], ok, info
+        )
+        if ok:
+            sent += 1
+    logger.info("AUTO_SEND SUMMARY | sent=%s skipped=%s total=%s", sent, skipped, len(clients))
+
+def setup_scheduler(application):
+    hour = int(os.getenv("AUTO_SEND_HOUR", "9"))
+    tz = ZoneInfo("America/Sao_Paulo")
+    scheduler = AsyncIOScheduler(timezone=tz)
+    scheduler.add_job(
+        daily_auto_send_job,
+        "cron",
+        hour=hour,
+        minute=0,
+        id="daily_auto_send",
+        replace_existing=True
+    )
+    scheduler.start()
+    logger.info("Scheduler iniciado | daily_auto_send @ %02d:00 America/Sao_Paulo", hour)
 
 # ---------------------------
 # APP
@@ -702,11 +757,11 @@ def build_application():
         raise RuntimeError("Defina a variável de ambiente TELEGRAM_BOT_TOKEN com o token do seu bot.")
 
     app = ApplicationBuilder().token(token).build()
-
-    # Global error handler
     app.add_error_handler(error_handler)
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("whats_qr", cmd_whats_qr))
+    app.add_handler(CommandHandler("run_auto", cmd_run_auto))  # disparo manual
 
     # Menu principal por texto
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
@@ -717,8 +772,7 @@ def build_application():
     app.add_handler(CallbackQueryHandler(editfield_select, pattern=r"^editfield:\d+:(name|phone|package|price|info|due_date)$"))
     app.add_handler(CallbackQueryHandler(send_choose, pattern=r"^(sendtpl|sendfree):\d+"))
     app.add_handler(CallbackQueryHandler(renew_callback, pattern=r"^renew:(auto|custom):\d+$"))
-
-    # IMPORTANTE: regex corrigido para aceitar "tpl:new" OU "tpl:edit:-?\d+"
+    # aceitar "tpl:new" OU "tpl:edit:-?\d+"
     app.add_handler(CallbackQueryHandler(template_choose, pattern=r"^tpl:(?:new|edit:-?\d+)$"))
 
     conv = ConversationHandler(
@@ -753,10 +807,9 @@ def build_application():
     app.add_handler(conv)
     return app
 
-
 if __name__ == "__main__":
     init_db()
     application = build_application()
+    setup_scheduler(application)
     logger.info("BOT GESTOR iniciado. Versão de PTB compatível (>=20).")
-    # Correção: remover close_loop=False (pode lançar TypeError em algumas versões)
     application.run_polling()
