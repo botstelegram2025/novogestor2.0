@@ -1,7 +1,5 @@
-# requirements.txt  (substitua o seu por este)
-# Somente o que o seu código realmente usa.
-# Removi python-telegram-bot, Flask, Gunicorn, APScheduler, qrcode, Pillow, httpx/httpcore, etc.
-
+# requirements.app.txt
+# Somente o que o seu bot realmente usa em Python.
 aiogram==3.7.0
 python-dotenv==1.0.1
 psycopg2-binary==2.9.10
