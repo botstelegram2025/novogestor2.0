@@ -2,6 +2,8 @@
 import os
 import asyncio
 import re
+import base64
+from io import BytesIO
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -14,7 +16,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery,
+    CallbackQuery, BufferedInputFile
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -299,9 +301,8 @@ def wa_format_to_jid(phone: str | None) -> str | None:
     p = "".join(ch for ch in phone if ch.isdigit())
     if p.startswith("0"):
         p = p.lstrip("0")
-    if not p.startswith("55") and not phone.startswith("+"):
-        # ajuste simples; personalize se necessário
-        p = "55" + p
+    if not p.startswith("55") and not (phone or "").startswith("+"):
+        p = "55" + p  # ajuste simples para BR; personalize conforme necessário
     return p
 
 def wa_send_now(to_phone: str, text: str) -> tuple[bool, str]:
@@ -328,13 +329,45 @@ def wa_schedule_at(to_phone: str, text: str, dt_iso_utc: str) -> tuple[bool, str
 
 def parse_br_datetime(s: str) -> datetime | None:
     s = s.strip()
-    # dd/mm/aaaa HH:MM
     try:
         dt_naive = datetime.strptime(s, "%d/%m/%Y %H:%M")
         dt_local = dt_naive.replace(tzinfo=ZoneInfo(TZ_NAME))
         return dt_local
     except ValueError:
         return None
+
+def wa_get_health() -> tuple[bool, dict | None, str | None]:
+    if not WA_API_BASE:
+        return False, None, "WA_API_BASE não configurado"
+    try:
+        r = requests.get(f"{WA_API_BASE}/health", timeout=10)
+        if r.status_code != 200:
+            return False, None, f"HTTP {r.status_code}"
+        return True, r.json(), None
+    except Exception as e:
+        return False, None, str(e)
+
+def wa_get_qr() -> tuple[bool, dict | None, str | None]:
+    if not WA_API_BASE:
+        return False, None, "WA_API_BASE não configurado"
+    try:
+        r = requests.get(f"{WA_API_BASE}/qr", timeout=10)
+        if r.status_code == 200:
+            return True, r.json(), None
+        return False, None, f"HTTP {r.status_code}: {r.text}"
+    except Exception as e:
+        return False, None, str(e)
+
+def _send_qr_image_to_telegram(m: Message, data_url: str):
+    # data:image/png;base64,XXXXX
+    try:
+        header, b64 = data_url.split(",", 1)
+    except ValueError:
+        return False
+    raw = base64.b64decode(b64)
+    file = BufferedInputFile(raw, filename="wa_qr.png")
+    asyncio.create_task(m.answer_photo(file, caption="Escaneie este QR no WhatsApp para conectar."))
+    return True
 
 # ---------------------- Handlers: Usuário ----------------------
 @dp.message(Command("start"))
@@ -359,10 +392,31 @@ async def cmd_help(m: Message):
         "• /start — menu principal\n"
         "• /help — ajuda\n"
         "• /templates — gerenciar templates de mensagens\n"
+        "• /wa — status do WhatsApp (Baileys)\n"
         "• /id 123 — detalhes do cliente por ID\n"
         "\nUse o teclado para ➕ Novo Cliente, 📋 Clientes, ou 🧩 Templates.",
         reply_markup=kb_main()
     )
+
+@dp.message(Command("wa"))
+async def cmd_wa(m: Message):
+    if not WA_API_BASE:
+        await m.answer("❌ <b>WhatsApp:</b> WA_API_BASE não configurado.\n"
+                       "Defina a variável de ambiente <code>WA_API_BASE</code> com a URL do seu serviço Baileys (ex.: https://seuapp.up.railway.app).")
+        return
+    ok, health, err = wa_get_health()
+    if not ok:
+        await m.answer(f"❌ Falha ao consultar /health: {err}")
+        return
+    if health.get("connected"):
+        await m.answer("✅ WhatsApp conectado (Baileys).")
+    else:
+        await m.answer("ℹ️ WhatsApp <b>não conectado</b>. Vou tentar buscar o QR…")
+        ok2, qr, err2 = wa_get_qr()
+        if ok2 and qr and qr.get("qr"):
+            _send_qr_image_to_telegram(m, qr["qr"])
+        else:
+            await m.answer(f"❌ Não consegui obter QR agora. Detalhes: {err2 or 'indisponível'}")
 
 # ---------------------- Templates: Gestão ----------------------
 def templates_list_kb() -> InlineKeyboardMarkup:
