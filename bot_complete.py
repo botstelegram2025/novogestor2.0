@@ -1,4 +1,4 @@
-    import os, re, base64, requests, asyncio
+import os, re, base64, requests, asyncio
 from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -10,8 +10,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-
-    import db
+import db
 
     BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
     if not BOT_TOKEN:
