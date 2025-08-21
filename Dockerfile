@@ -24,8 +24,9 @@ COPY requirements.app.txt /app/requirements.app.txt
 RUN pip install -r /app/requirements.app.txt
 
 # Node deps
-COPY package.json package-lock.json /app/
-RUN npm ci --omit=dev
+COPY package.json /app/
+COPY package-lock.json* /app/
+RUN npm ci --omit=dev || npm install --omit=dev
 
 # Código
 COPY bot_complete.py db.py /app/
