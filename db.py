@@ -1,275 +1,165 @@
 # db.py
-import sqlite3
-import logging
-from contextlib import contextmanager
-from datetime import datetime, timedelta, date
+import os
+import psycopg2
+import psycopg2.extras
+from typing import List, Optional, Dict, Any
+from datetime import date, datetime
 
-logger = logging.getLogger("db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("Defina DATABASE_URL nas variáveis de ambiente")
 
-DB_PATH = "bot_gestor.db"
-DATE_FMT = "%Y-%m-%d"   # ISO (armazenamento)
-HUMAN_FMT = "%d/%m/%Y"  # Exibição
-
-def _apply_pragmas(con: sqlite3.Connection):
-    cur = con.cursor()
-    # Segurança e performance
-    cur.execute("PRAGMA foreign_keys = ON;")
-    cur.execute("PRAGMA journal_mode = WAL;")
-    cur.execute("PRAGMA synchronous = NORMAL;")
-    cur.close()
-
-@contextmanager
-def _conn():
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    _apply_pragmas(con)
-    try:
-        yield con
-        con.commit()
-    except Exception as e:
-        con.rollback()
-        logger.exception("DB error, rollback applied: %s", e)
-        raise
-    finally:
-        con.close()
+def connect():
+    # Se precisar SSL forçado: acrescente ?sslmode=require à URL (Railway aceita sem)
+    return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    with _conn() as con:
-        cur = con.cursor()
-        # Tabela de clientes
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS clients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            phone TEXT,
-            package TEXT,
-            price REAL,
-            info TEXT,
-            due_date TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        """)
-        # Índices úteis
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_due ON clients(due_date);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name);")
+    with connect() as conn:
+        with conn.cursor() as cur:
+            # Tabela de clientes
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS clientes (
+                id SERIAL PRIMARY KEY,
+                nome TEXT NOT NULL,
+                telefone TEXT,
+                email TEXT,
+                pacote TEXT,
+                valor NUMERIC(12,2),
+                vencimento DATE,
+                info TEXT,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            # Garantir colunas para upgrades
+            cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pacote TEXT;")
+            cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS valor NUMERIC(12,2);")
+            cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS vencimento DATE;")
+            cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS info TEXT;")
 
-        # Tabela de templates (um por offset, por enquanto)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS templates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            label TEXT NOT NULL,
-            offset_days INTEGER,
-            content TEXT NOT NULL,
-            UNIQUE(offset_days)
-        );
-        """)
-        # Pré-popular templates padrão (se não existirem)
-        defaults = [
-            ("2 dias antes", -2, "Olá {nome}! Passando para lembrar que seu pagamento vence em {dias} dias, em {vencimento}. Qualquer dúvida, estou por aqui."),
-            ("1 dia antes", -1, "Oi {nome}, tudo bem? Amanhã ({vencimento}) vence sua assinatura do pacote {pacote} no valor de R$ {valor:.2f}."),
-            ("No dia", 0, "Olá {nome}! Hoje é o vencimento ({vencimento}) da sua mensalidade do pacote {pacote}. Conto com você 😉"),
-            ("1 dia depois", 1, "Oi {nome}, vi aqui que o vencimento foi ontem ({vencimento}). Precisa de algo? Posso te mandar o link de pagamento."),
-            ("Renovação", 30, "Oi {nome}! Obrigado por renovar o pacote {pacote}. Atualizamos seu vencimento para {vencimento}.")
-        ]
-        for label, off, content in defaults:
+            # Tabela de usuários (cadastro no 1º acesso)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id SERIAL PRIMARY KEY,
+                tg_id BIGINT UNIQUE NOT NULL,
+                nome TEXT,
+                email TEXT,
+                telefone TEXT,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        conn.commit()
+
+# ----------------- CLIENTES -----------------
+def inserir_cliente(
+    nome: str,
+    telefone: Optional[str],
+    pacote: Optional[str],
+    valor: Optional[float],
+    vencimento: Optional[str],
+    info: Optional[str],
+) -> int:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO clientes (nome, telefone, pacote, valor, vencimento, info) "
+                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;",
+                (nome, telefone, pacote, valor, vencimento, info),
+            )
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        return new_id
+
+def listar_clientes(limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, nome, telefone, pacote, valor, vencimento, info, created_at "
+                "FROM clientes ORDER BY id DESC LIMIT %s OFFSET %s;",
+                (limit, offset),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+def contar_clientes() -> int:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM clientes;")
+            return cur.fetchone()[0]
+
+def buscar_cliente_por_id(cid: int) -> Optional[Dict[str, Any]]:
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM clientes WHERE id = %s;", (cid,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+def deletar_cliente(cid: int) -> bool:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM clientes WHERE id = %s;", (cid,))
+        conn.commit()
+        return True
+
+def atualizar_cliente(cid: int, **fields) -> bool:
+    """Atualiza campos do cliente. Campos: nome, telefone, pacote, valor, vencimento, info, email."""
+    allowed = {"nome", "telefone", "pacote", "valor", "vencimento", "info", "email"}
+    set_parts, values = [], []
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        if k == "vencimento" and isinstance(v, str):
             try:
-                cur.execute(
-                    "INSERT OR IGNORE INTO templates (label, offset_days, content) VALUES (?, ?, ?)",
-                    (label, off, content)
-                )
-            except sqlite3.IntegrityError:
+                v = datetime.fromisoformat(v).date()
+            except ValueError:
                 pass
-        logger.info("DB init ok (clients/templates).")
-
-def add_client(name, phone, package, price, info, due_date_iso):
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    with _conn() as con:
-        cur = con.cursor()
-        cur.execute("""
-            INSERT INTO clients (name, phone, package, price, info, due_date, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (name, phone, package, price, info, due_date_iso, now, now))
-        cid = cur.lastrowid
-        logger.info("add_client | id=%s name=%r due=%s", cid, name, due_date_iso)
-        return cid
-
-def get_clients():
-    with _conn() as con:
-        cur = con.cursor()
-        cur.execute("SELECT * FROM clients ORDER BY name ASC;")
-        rows = [dict(r) for r in cur.fetchall()]
-        logger.debug("get_clients | count=%d", len(rows))
-        return rows
-
-def get_client(client_id):
-    with _conn() as con:
-        cur = con.cursor()
-        cur.execute("SELECT * FROM clients WHERE id = ?;", (client_id,))
-        r = cur.fetchone()
-        logger.debug("get_client | id=%s found=%s", client_id, bool(r))
-        return dict(r) if r else None
-
-def update_client_field(client_id, field, value):
-    if field not in {"name", "phone", "package", "price", "info", "due_date"}:
-        raise ValueError("Campo inválido.")
-    # Validação leve
-    if field == "price":
-        try:
-            value = float(value)
-        except Exception:
-            raise ValueError("Preço inválido.")
-    if field == "due_date":
-        # Confirma formato ISO
-        try:
-            datetime.strptime(str(value), DATE_FMT)
-        except Exception:
-            raise ValueError(f"Data de vencimento deve estar em ISO {DATE_FMT}.")
-
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    with _conn() as con:
-        cur = con.cursor()
-        cur.execute(f"UPDATE clients SET {field} = ?, updated_at = ? WHERE id = ?;", (value, now, client_id))
-        ok = cur.rowcount > 0
-        logger.info("update_client_field | id=%s field=%s ok=%s", client_id, field, ok)
-        return ok
-
-def delete_client(client_id):
-    with _conn() as con:
-        cur = con.cursor()
-        cur.execute("DELETE FROM clients WHERE id = ?;", (client_id,))
-        ok = cur.rowcount > 0
-        logger.info("delete_client | id=%s ok=%s", client_id, ok)
-        return ok
-
-def renew_client(client_id, cycle_days=30):
-    c = get_client(client_id)
-    if not c:
+        set_parts.append(f"{k}=%s")
+        values.append(v)
+    if not set_parts:
         return False
-    # Se vencido, renova a partir de hoje; se ainda vigente, soma ao vencimento atual
-    try:
-        current_due = datetime.strptime(c["due_date"], DATE_FMT).date()
-    except Exception:
-        current_due = date.today()
-    base = date.today() if current_due < date.today() else current_due
-    new_due = base + timedelta(days=cycle_days)
-    ok = update_client_field(client_id, "due_date", new_due.strftime(DATE_FMT))
-    logger.info("renew_client | id=%s base=%s new_due=%s ok=%s", client_id, base, new_due, ok)
-    return ok, new_due
-
-def list_templates():
-    with _conn() as con:
-        cur = con.cursor()
-        cur.execute("SELECT * FROM templates ORDER BY offset_days ASC;")
-        rows = [dict(r) for r in cur.fetchall()]
-        logger.debug("list_templates | count=%d", len(rows))
-        return rows
-
-def get_template_by_offset(offset_days):
-    with _conn() as con:
-        cur = con.cursor()
-        cur.execute("SELECT * FROM templates WHERE offset_days = ?;", (offset_days,))
-        r = cur.fetchone()
-        logger.debug("get_template_by_offset | off=%s found=%s", offset_days, bool(r))
-        return dict(r) if r else None
-
-def set_template(offset_days, label, content):
-    with _conn() as con:
-        cur = con.cursor()
-        cur.execute("""
-            INSERT INTO templates (label, offset_days, content)
-            VALUES (?, ?, ?)
-            ON CONFLICT(offset_days) DO UPDATE SET label=excluded.label, content=excluded.content
-        """, (label, offset_days, content))
-        logger.info("set_template | off=%s label=%r (upsert)", offset_days, label)
+    values.append(cid)
+    query = "UPDATE clientes SET " + ", ".join(set_parts) + " WHERE id=%s;"
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, values)
+        conn.commit()
     return True
 
-# ---------- Helpers ----------
+def renovar_vencimento(cid: int, months: int) -> Optional[date]:
+    """Soma 'months' ao vencimento atual (ou hoje se vazio) e retorna a nova data."""
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT vencimento FROM clientes WHERE id=%s;", (cid,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            base = row["vencimento"] or date.today()
+            new_date = _add_months(base, months)
+            cur.execute("UPDATE clientes SET vencimento=%s WHERE id=%s;", (new_date, cid))
+        conn.commit()
+        return new_date
 
-def iso_to_human(iso_str):
-    try:
-        d = datetime.strptime(iso_str, DATE_FMT).date()
-        return d.strftime(HUMAN_FMT)
-    except Exception:
-        return iso_str
+def _add_months(d: date, months: int) -> date:
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    last_day = [31, 29 if (y%4==0 and (y%100!=0 or y%400==0)) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m-1]
+    day = min(d.day, last_day)
+    return date(y, m, day)
 
-def human_to_iso(human_str):
-    d = datetime.strptime(human_str.strip(), HUMAN_FMT).date()
-    return d.strftime(DATE_FMT)
+# ----------------- USUÁRIOS -----------------
+def buscar_usuario(tg_id: int) -> Optional[Dict[str, Any]]:
+    with connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM usuarios WHERE tg_id = %s;", (tg_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
 
-def days_until_due(iso_str):
-    try:
-        d = datetime.strptime(iso_str, DATE_FMT).date()
-    except Exception:
-        return None
-    return (d - date.today()).days
-
-def status_emoji(iso_str):
-    days = days_until_due(iso_str)
-    if days is None:
-        return "⚪"
-    if days < 0:
-        return "🔴"
-    if days <= 3:
-        return "🟡"
-    return "🟢"
-
-def get_status(iso_str):
-    """Retorna 'overdue'|'soon'|'ok' para uso em filtros futuros."""
-    days = days_until_due(iso_str)
-    if days is None:
-        return "unknown"
-    if days < 0:
-        return "overdue"
-    if days <= 3:
-        return "soon"
-    return "ok"
-
-def render_template(content, client_row, ref_days=None):
-    di = days_until_due(client_row["due_date"])
-    ctx = {
-        "nome": client_row.get("name") or "",
-        "telefone": client_row.get("phone") or "",
-        "pacote": client_row.get("package") or "",
-        "valor": float(client_row.get("price") or 0.0),
-        "info": client_row.get("info") or "",
-        "vencimento": iso_to_human(client_row.get("due_date") or ""),
-        "dias": ref_days if ref_days is not None else (di if di is not None else "")
-    }
-    try:
-        return content.format(**ctx)
-    except Exception as e:
-        logger.warning("render_template fallback (placeholders) | err=%s | content=%r", e, content)
-        return content
-
-# ---------- (Opcional) Migração para permitir múltiplos templates por offset ----------
-def migrate_templates_allow_duplicates():
-    """
-    Remove a restrição UNIQUE(offset_days) recriando a tabela.
-    NÃO é chamada automaticamente. Execute manualmente se quiser permitir vários
-    templates com o mesmo offset.
-
-    Atenção: mantém os dados existentes.
-    """
-    with _conn() as con:
-        cur = con.cursor()
-        logger.info("Migrando tabela templates para permitir duplicados de offset_days...")
-        # 1) Renomeia tabela antiga
-        cur.execute("ALTER TABLE templates RENAME TO templates_old;")
-        # 2) Cria nova tabela sem UNIQUE
-        cur.execute("""
-        CREATE TABLE templates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            label TEXT NOT NULL,
-            offset_days INTEGER,
-            content TEXT NOT NULL
-        );
-        """)
-        # 3) Copia dados
-        cur.execute("""
-        INSERT INTO templates (label, offset_days, content)
-        SELECT label, offset_days, content FROM templates_old;
-        """)
-        # 4) Drop tabela antiga
-        cur.execute("DROP TABLE templates_old;")
-        logger.info("Migração concluída.")
+def inserir_usuario(tg_id: int, nome: str, email: str, telefone: str) -> int:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO usuarios (tg_id, nome, email, telefone) "
+                "VALUES (%s, %s, %s, %s) RETURNING id;",
+                (tg_id, nome, email, telefone),
+            )
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        return new_id
