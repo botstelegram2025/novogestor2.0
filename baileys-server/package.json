@@ -1,12 +1,16 @@
 {
   "name": "baileys-server",
-  "version": "0.1.0",
-  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "baileys-server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node baileys-server.js"
   },
   "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.8",
     "express": "^4.19.2",
-    "body-parser": "^1.20.2"
+    "qrcode": "^1.5.3",
+    "multer": "^1.4.5-lts.1",
+    "cors": "^2.8.5"
   }
 }
