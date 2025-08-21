@@ -362,6 +362,14 @@ def _send_qr_image_to_telegram(m: Message, html_or_dataurl: str):
     asyncio.create_task(m.answer_photo(file, caption="Escaneie este QR no WhatsApp para conectar."))
     return True
 
+def kb_wa_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📲 Status", callback_data="wa:status"),
+         InlineKeyboardButton(text="🔑 QR Code", callback_data="wa:qr")],
+        [InlineKeyboardButton(text="📜 Logs", callback_data="wa:logs"),
+         InlineKeyboardButton(text="🗑 Logout", callback_data="wa:logout")]
+    ])
+
 # =============== Handlers: Usuário ===============
 @dp.message(Command("start"))
 async def cmd_start(m: Message, state: FSMContext):
@@ -386,21 +394,20 @@ async def cmd_help(m: Message):
         "• /start — menu principal\n"
         "• /help — ajuda\n"
         "• /templates — gerenciar templates de mensagens\n"
-        "• /wa — status do WhatsApp (Baileys)\n"
+        "• /wa — painel do WhatsApp (Baileys)\n"
         "• /id 123 — detalhes do cliente por ID\n"
-        "\nUse o teclado para ➕ Novo Cliente, 📋 Clientes, ou 🧩 Templates.",
+        "\nUse o teclado para ➕ Novo Cliente, 📋 Clientes, 🧩 Templates e 🟢 WhatsApp.",
         reply_markup=kb_main()
     )
 
 @dp.message(Command("wa"))
 async def cmd_wa(m: Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📲 Status", callback_data="wa:status"),
-         InlineKeyboardButton(text="🔑 QR Code", callback_data="wa:qr")],
-        [InlineKeyboardButton(text="📜 Logs", callback_data="wa:logs"),
-         InlineKeyboardButton(text="🗑 Logout", callback_data="wa:logout")]
-    ])
-    await m.answer("📱 Painel WhatsApp", reply_markup=kb)
+    await m.answer("📱 Painel WhatsApp", reply_markup=kb_wa_panel())
+
+# 👉 **NOVO**: handler para o botão de teclado “🟢 WhatsApp” (ou qualquer texto contendo “whatsapp”)
+@dp.message(F.text.regexp(r"(?i)whatsapp"))
+async def whatsapp_button(m: Message):
+    await m.answer("📱 Painel WhatsApp", reply_markup=kb_wa_panel())
 
 @dp.callback_query(F.data == "wa:status")
 async def wa_status(cq: CallbackQuery):
@@ -984,15 +991,6 @@ async def cb_wa_schedule_ask(cq: CallbackQuery, state: FSMContext):
     await state.set_state(ScheduleWA.waiting_datetime)
     await cq.message.answer("🗓️ Informe <b>data e hora</b> (dd/mm/aaaa HH:MM) para agendar o WhatsApp:")
     await cq.answer()
-
-def parse_br_datetime(s: str) -> Optional[datetime]:
-    s = s.strip()
-    try:
-        dt_naive = datetime.strptime(s, "%d/%m/%Y %H:%M")
-        dt_local = dt_naive.replace(tzinfo=ZoneInfo(TZ_NAME))
-        return dt_local
-    except ValueError:
-        return None
 
 @dp.message(ScheduleWA.waiting_datetime)
 async def cb_wa_schedule_set(m: Message, state: FSMContext):
