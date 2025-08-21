@@ -266,8 +266,11 @@ async def open_wa(m: types.Message):
 async def wa_cmd(m: types.Message):
     await open_wa(m)
 
-@dp.callback_query(F.data == "wa:status")
+# --- CORRIGIDOS: Handlers de Callback WhatsApp usando lambda ---
+
+@dp.callback_query(lambda cq: cq.data == "wa:status")
 async def wa_status(cq: types.CallbackQuery):
+    print("wa:status acionado")  # log para depuração
     try:
         r = wa_get("/status").json()
         await cq.message.answer(f"Status: <b>{r.get('status')}</b>\nUsuário: <code>{r.get('user')}</code>")
@@ -275,8 +278,9 @@ async def wa_status(cq: types.CallbackQuery):
         await cq.message.answer(f"❌ Erro: {e}")
     await cq.answer()
 
-@dp.callback_query(F.data == "wa:qr")
+@dp.callback_query(lambda cq: cq.data == "wa:qr")
 async def wa_qr(cq: types.CallbackQuery):
+    print("wa:qr acionado")  # log para depuração
     try:
         r = wa_get("/qr")
         if "data:image" in r.text:
@@ -290,8 +294,9 @@ async def wa_qr(cq: types.CallbackQuery):
         await cq.message.answer(f"❌ Erro ao obter QR: {e}")
     await cq.answer()
 
-@dp.callback_query(F.data == "wa:logs")
+@dp.callback_query(lambda cq: cq.data == "wa:logs")
 async def wa_logs(cq: types.CallbackQuery):
+    print("wa:logs acionado")  # log para depuração
     try:
         r = wa_get("/logs").json()
         txt = "\n".join(r[-30:]) if isinstance(r, list) else str(r)
@@ -300,8 +305,9 @@ async def wa_logs(cq: types.CallbackQuery):
         await cq.message.answer(f"❌ Erro: {e}")
     await cq.answer()
 
-@dp.callback_query(F.data == "wa:logout")
+@dp.callback_query(lambda cq: cq.data == "wa:logout")
 async def wa_logout(cq: types.CallbackQuery):
+    print("wa:logout acionado")  # log para depuração
     try:
         wa_get("/logout")
         await cq.message.answer("✅ Sessão encerrada.")
