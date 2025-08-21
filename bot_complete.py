@@ -3,7 +3,8 @@ import os
 import asyncio
 import re
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -21,6 +22,8 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
+import requests
+
 from db import (
     init_db,
     buscar_usuario, inserir_usuario,
@@ -29,8 +32,10 @@ from db import (
     list_templates, get_template, update_template, reset_template
 )
 
-# ---------------------- Config de Status/Vencimento ----------------------
+# ---------------------- Config ----------------------
 DUE_SOON_DAYS = 5  # até 5 dias para vencer -> 🟡
+TZ_NAME = os.getenv("TZ", "America/Sao_Paulo")
+WA_API_BASE = os.getenv("WA_API_BASE")  # ex.: https://seu-subdominio.railway.app
 
 # ---------------------- Estados (FSM) ----------------------
 class CadastroUsuario(StatesGroup):
@@ -62,7 +67,10 @@ class MsgCliente(StatesGroup):
     personalizada = State()
 
 class EditTemplate(StatesGroup):
-    waiting_body = State()   # editar apenas body; título permanece
+    waiting_body = State()
+
+class ScheduleWA(StatesGroup):
+    waiting_datetime = State()  # dd/mm/aaaa HH:MM
 
 # ---------------------- Helpers ----------------------
 def normaliza_tel(v: str | None) -> str | None:
@@ -81,7 +89,6 @@ def parse_valor(txt: str) -> Decimal | None:
         return None
 
 def parse_vencimento(txt: str):
-    """Retorna date (ou None). Aceita dd/mm/aaaa, dd/mm, aaaa-mm-dd, dd-mm-aaaa."""
     if not txt:
         return None
     txt = txt.strip()
@@ -112,11 +119,6 @@ def to_date(dv) -> date | None:
     return None
 
 def due_dot(dv) -> str:
-    """
-    🟢 vencimento > hoje + DUE_SOON_DAYS
-    🟡 hoje <= vencimento <= hoje + DUE_SOON_DAYS  (ou sem data)
-    🔴 vencimento < hoje
-    """
     d = to_date(dv)
     today = date.today()
     if d is None:
@@ -290,6 +292,50 @@ if not BOT_TOKEN:
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
+# ---------------------- WhatsApp microserviço ----------------------
+def wa_format_to_jid(phone: str | None) -> str | None:
+    if not phone:
+        return None
+    p = "".join(ch for ch in phone if ch.isdigit())
+    if p.startswith("0"):
+        p = p.lstrip("0")
+    if not p.startswith("55") and not phone.startswith("+"):
+        # ajuste simples; personalize se necessário
+        p = "55" + p
+    return p
+
+def wa_send_now(to_phone: str, text: str) -> tuple[bool, str]:
+    if not WA_API_BASE:
+        return False, "WA_API_BASE não configurado"
+    try:
+        r = requests.post(f"{WA_API_BASE}/send", json={"to": to_phone, "text": text}, timeout=15)
+        if r.status_code == 200:
+            return True, "Enviado com sucesso"
+        return False, f"Erro {r.status_code}: {r.text}"
+    except Exception as e:
+        return False, f"Falha ao conectar: {e}"
+
+def wa_schedule_at(to_phone: str, text: str, dt_iso_utc: str) -> tuple[bool, str]:
+    if not WA_API_BASE:
+        return False, "WA_API_BASE não configurado"
+    try:
+        r = requests.post(f"{WA_API_BASE}/schedule", json={"to": to_phone, "text": text, "send_at": dt_iso_utc}, timeout=15)
+        if r.status_code == 200:
+            return True, "Agendado com sucesso"
+        return False, f"Erro {r.status_code}: {r.text}"
+    except Exception as e:
+        return False, f"Falha ao conectar: {e}"
+
+def parse_br_datetime(s: str) -> datetime | None:
+    s = s.strip()
+    # dd/mm/aaaa HH:MM
+    try:
+        dt_naive = datetime.strptime(s, "%d/%m/%Y %H:%M")
+        dt_local = dt_naive.replace(tzinfo=ZoneInfo(TZ_NAME))
+        return dt_local
+    except ValueError:
+        return None
+
 # ---------------------- Handlers: Usuário ----------------------
 @dp.message(Command("start"))
 async def cmd_start(m: Message, state: FSMContext):
@@ -318,7 +364,7 @@ async def cmd_help(m: Message):
         reply_markup=kb_main()
     )
 
-# ---------------------- Templates: Gestão via comando/teclado ----------------------
+# ---------------------- Templates: Gestão ----------------------
 def templates_list_kb() -> InlineKeyboardMarkup:
     items = list_templates()
     rows = []
@@ -336,8 +382,7 @@ def templates_list_kb() -> InlineKeyboardMarkup:
 async def cmd_templates(m: Message):
     await m.answer(
         "🧩 <b>Templates de Mensagens</b>\n"
-        "Escolha uma opção para visualizar, editar ou resetar para o padrão.\n"
-        "Variáveis suportadas: {nome}, {pacote}, {valor}, {vencimento}, {telefone}, {dias_para_vencer}, {dias_atraso}",
+        "Variáveis: {nome}, {pacote}, {valor}, {vencimento}, {telefone}, {dias_para_vencer}, {dias_atraso}",
         reply_markup=templates_list_kb()
     )
 
@@ -366,7 +411,7 @@ async def cb_tpl_edit(cq: CallbackQuery, state: FSMContext):
         f"✏️ Editando <b>{tpl['title']}</b>\n"
         "Envie o <b>novo texto</b> do template.\n\n"
         "Variáveis: {nome}, {pacote}, {valor}, {vencimento}, {telefone}, {dias_para_vencer}, {dias_atraso}\n\n"
-        f"Texto atual:\n<code>{tpl['body']}</code>"
+        f"Atual:\n<code>{tpl['body']}</code>"
     )
     await cq.answer()
 
@@ -375,8 +420,8 @@ async def cb_tpl_reset(cq: CallbackQuery):
     key = cq.data.split(":")[2]
     ok = reset_template(key)
     if not ok:
-        await cq.answer("Não foi possível resetar (chave inválida).", show_alert=True); return
-    await cq.message.answer("✅ Template resetado para o padrão.")
+        await cq.answer("Chave inválida.", show_alert=True); return
+    await cq.message.answer("✅ Template resetado.")
     await cq.answer()
 
 @dp.message(EditTemplate.waiting_body)
@@ -385,7 +430,7 @@ async def tpl_receive_body(m: Message, state: FSMContext):
     key = data.get("edit_tpl_key")
     if not key:
         await state.clear()
-        await m.answer("Chave do template ausente. Tente novamente com /templates.")
+        await m.answer("Chave do template ausente. Use /templates novamente.")
         return
     body = (m.text or "").strip()
     update_template(key, body=body)
@@ -539,7 +584,6 @@ async def ver_clientes(m: Message):
 
 @dp.callback_query(F.data.startswith("list:page:"))
 async def cb_list_page(cq: CallbackQuery):
-    # list:page:<offset>
     _, _, off = cq.data.split(":")
     offset = int(off)
     limit = 10
@@ -552,8 +596,7 @@ async def cb_list_page(cq: CallbackQuery):
     await cq.answer()
 
 @dp.callback_query(F.data.startswith("cli:"))
-async def cb_cli_router(cq: CallbackQuery):
-    # cli:<cid>:view|edit|renew|msg|del
+async def cb_cli_router(cq: CallbackQuery, state: FSMContext):
     _, cid, action = cq.data.split(":")
     cid = int(cid)
     c = buscar_cliente_por_id(cid)
@@ -600,7 +643,6 @@ async def cb_del_confirm(cq: CallbackQuery):
 # ---------------------- Editar Cliente ----------------------
 @dp.callback_query(F.data.startswith("edit:"))
 async def cb_edit_select(cq: CallbackQuery, state: FSMContext):
-    # edit:<cid>:<campo>
     _, cid, campo = cq.data.split(":")
     cid = int(cid)
     await state.update_data(edit_cid=cid)
@@ -711,7 +753,6 @@ PACOTE_TO_MONTHS = {"mensal": 1, "trimestral": 3, "semestral": 6, "anual": 12}
 
 @dp.callback_query(F.data.startswith("renew:"))
 async def cb_renew(cq: CallbackQuery):
-    # renew:<cid>:<months|auto>
     _, cid, opt = cq.data.split(":")
     cid = int(cid)
     c = buscar_cliente_por_id(cid)
@@ -733,7 +774,7 @@ async def cb_renew(cq: CallbackQuery):
     )
     await cq.answer()
 
-# ---------------------- Mensagens (Templates por situação) ----------------------
+# ---------------------- Mensagens (Templates + WhatsApp) ----------------------
 def compute_key_auto(venc) -> str:
     d = to_date(venc)
     if not d:
@@ -765,9 +806,16 @@ def render_template_text(body: str, c: dict) -> str:
         dias_atraso=str(dias_atraso) if dias_atraso is not None else "—",
     )
 
+def msg_send_options_kb(cid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📲 WhatsApp • Enviar agora", callback_data=f"wa:send:{cid}")],
+        [InlineKeyboardButton(text="🗓️ WhatsApp • Agendar", callback_data=f"wa:schedule:{cid}")],
+        [InlineKeyboardButton(text="📣 Telegram • Enviar aqui", callback_data=f"tg:send:{cid}")],
+        [InlineKeyboardButton(text="⬅️ Voltar", callback_data=f"cli:{cid}:view")]
+    ])
+
 @dp.callback_query(F.data.startswith("tplmsg:"))
 async def cb_tplmsg(cq: CallbackQuery, state: FSMContext):
-    # tplmsg:<cid>:<key|AUTO>
     _, cid, key = cq.data.split(":")
     cid = int(cid)
     c = buscar_cliente_por_id(cid)
@@ -776,19 +824,72 @@ async def cb_tplmsg(cq: CallbackQuery, state: FSMContext):
 
     if key == "AUTO":
         key = compute_key_auto(c.get("vencimento"))
-
     tpl = get_template(key)
     if not tpl:
         await cq.answer("Template não encontrado.", show_alert=True); return
 
     text = render_template_text(tpl["body"], c)
-    await cq.message.answer(text)
+    await state.update_data(preview_cid=cid, preview_text=text)
+    await cq.message.answer("📝 <b>Prévia da mensagem</b>:\n\n" + text, reply_markup=msg_send_options_kb(cid))
     await cq.answer()
 
-# Mensagem personalizada (com variáveis)
+@dp.callback_query(F.data.startswith("tg:send:"))
+async def cb_tg_send(cq: CallbackQuery, state: FSMContext):
+    _, cid = cq.data.split(":")[1:]
+    data = await state.get_data()
+    text = data.get("preview_text")
+    if not text:
+        await cq.answer("Prévia indisponível. Selecione o template novamente.", show_alert=True); return
+    await cq.message.answer(text)
+    await cq.answer("Enviado no Telegram ✅")
+
+@dp.callback_query(F.data.startswith("wa:send:"))
+async def cb_wa_send_now(cq: CallbackQuery, state: FSMContext):
+    _, _, cid = cq.data.split(":")
+    cid = int(cid)
+    c = buscar_cliente_por_id(cid)
+    data = await state.get_data()
+    text = data.get("preview_text")
+    phone = wa_format_to_jid(c.get("telefone"))
+    if not phone:
+        await cq.answer("Telefone do cliente ausente/ inválido.", show_alert=True); return
+    ok, msg = wa_send_now(phone, text)
+    status = "✅" if ok else "❌"
+    await cq.message.answer(f"{status} WhatsApp: {msg}")
+    await cq.answer()
+
+@dp.callback_query(F.data.startswith("wa:schedule:"))
+async def cb_wa_schedule_ask(cq: CallbackQuery, state: FSMContext):
+    _, _, cid = cq.data.split(":")
+    await state.update_data(schedule_cid=int(cid))
+    await state.set_state(ScheduleWA.waiting_datetime)
+    await cq.message.answer("🗓️ Informe <b>data e hora</b> (dd/mm/aaaa HH:MM) para agendar o WhatsApp:")
+    await cq.answer()
+
+@dp.message(ScheduleWA.waiting_datetime)
+async def cb_wa_schedule_set(m: Message, state: FSMContext):
+    dt = parse_br_datetime(m.text or "")
+    if not dt:
+        await m.answer("Formato inválido. Use: <code>dd/mm/aaaa HH:MM</code>")
+        return
+    dt_utc = dt.astimezone(timezone.utc)
+    data = await state.get_data()
+    cid = int(data.get("schedule_cid"))
+    c = buscar_cliente_por_id(cid)
+    text = data.get("preview_text")
+    phone = wa_format_to_jid(c.get("telefone"))
+    if not phone:
+        await state.clear()
+        await m.answer("Telefone do cliente ausente/ inválido.")
+        return
+    ok, msg = wa_schedule_at(phone, text, dt_utc.isoformat())
+    await state.clear()
+    status = "✅" if ok else "❌"
+    await m.answer(f"{status} Agendamento: {msg}")
+
+# Mensagem personalizada
 @dp.callback_query(F.data.startswith("msg:"))
 async def cb_msg_personalizada(cq: CallbackQuery, state: FSMContext):
-    # msg:<cid>:perso
     parts = cq.data.split(":")
     if len(parts) >= 3 and parts[2] == "perso":
         cid = int(parts[1])
@@ -810,10 +911,10 @@ async def msg_personalizada(m: Message, state: FSMContext):
         await m.answer("Cliente não encontrado.")
         return
     text = render_template_text(m.text, c)
-    await state.clear()
-    await m.answer(text)
+    await state.update_data(preview_cid=int(cid), preview_text=text)
+    await m.answer("📝 <b>Prévia da mensagem</b>:\n\n" + text, reply_markup=msg_send_options_kb(int(cid)))
 
-# ---------------------- Comandos utilitários ----------------------
+# ---------------------- Comando utilitário ----------------------
 @dp.message(Command("id"))
 async def cmd_id(m: Message, command: CommandObject):
     if not command.args or not command.args.strip().isdigit():
