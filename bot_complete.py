@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandObject, StateFilter, Text
+from aiogram.filters import Command, CommandObject, StateFilter
+from aiogram import F
 from aiogram.types import (
     Message,
     ReplyKeyboardMarkup, KeyboardButton,
