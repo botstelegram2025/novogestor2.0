@@ -209,7 +209,7 @@ def renew_menu_kb(cid: int, pacote: str | None) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="⬅️ Voltar", callback_data=f"cli:{cid}:view")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# --------- Templates: chaves e menus ----------
+# --------- TEMPLATES: menus ----------
 TPL_LABELS = {
     "AUTO": "✨ Sugerir automaticamente",
     "D2": "🧾 2 dias antes",
@@ -359,9 +359,8 @@ def wa_get_qr() -> tuple[bool, dict | None, str | None]:
         return False, None, str(e)
 
 def _send_qr_image_to_telegram(m: Message, data_url: str):
-    # data:image/png;base64,XXXXX
     try:
-        header, b64 = data_url.split(",", 1)
+        _, b64 = data_url.split(",", 1)
     except ValueError:
         return False
     raw = base64.b64decode(b64)
@@ -418,31 +417,54 @@ async def cmd_wa(m: Message):
         else:
             await m.answer(f"❌ Não consegui obter QR agora. Detalhes: {err2 or 'indisponível'}")
 
-# ---------------------- Templates: Gestão ----------------------
-def templates_list_kb() -> InlineKeyboardMarkup:
+# ---------------------- Templates: Gestão (lista -> submenu) ----------------------
+def templates_main_list_kb() -> InlineKeyboardMarkup:
     items = list_templates()
     rows = []
     for t in items:
         key = t["key"]
         title = t["title"]
-        rows.append([
-            InlineKeyboardButton(text=f"👁️ {title}", callback_data=f"tpl:view:{key}"),
-            InlineKeyboardButton(text="✏️ Editar", callback_data=f"tpl:edit:{key}"),
-            InlineKeyboardButton(text="🔁 Reset", callback_data=f"tpl:reset:{key}"),
-        ])
+        rows.append([InlineKeyboardButton(text=f"🧩 {title}", callback_data=f"tpl:open:{key}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def template_actions_kb(key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👁️ Ver texto", callback_data=f"tpl:view:{key}")],
+        [InlineKeyboardButton(text="✏️ Editar", callback_data=f"tpl:edit:{key}")],
+        [InlineKeyboardButton(text="🔁 Reset", callback_data=f"tpl:reset:{key}")],
+        [InlineKeyboardButton(text="⬅️ Voltar à lista", callback_data="tpl:back")]
+    ])
 
 @dp.message(Command("templates"))
 async def cmd_templates(m: Message):
     await m.answer(
         "🧩 <b>Templates de Mensagens</b>\n"
         "Variáveis: {nome}, {pacote}, {valor}, {vencimento}, {telefone}, {dias_para_vencer}, {dias_atraso}",
-        reply_markup=templates_list_kb()
+        reply_markup=templates_main_list_kb()
     )
 
 @dp.message(F.text.casefold() == "🧩 templates")
 async def menu_templates(m: Message):
     await cmd_templates(m)
+
+@dp.callback_query(F.data == "tpl:back")
+async def cb_tpl_back(cq: CallbackQuery):
+    await cq.message.edit_text(
+        "🧩 <b>Templates de Mensagens</b>\n"
+        "Variáveis: {nome}, {pacote}, {valor}, {vencimento}, {telefone}, {dias_para_vencer}, {dias_atraso}",
+    )
+    await cq.message.edit_reply_markup(reply_markup=templates_main_list_kb())
+    await cq.answer()
+
+@dp.callback_query(F.data.startswith("tpl:open:"))
+async def cb_tpl_open(cq: CallbackQuery):
+    key = cq.data.split(":")[2]
+    tpl = get_template(key)
+    if not tpl:
+        await cq.answer("Template não encontrado", show_alert=True); return
+    await cq.message.edit_text(f"🧩 <b>{tpl['title']}</b>\nEscolha uma ação abaixo.")
+    await cq.message.edit_reply_markup(reply_markup=template_actions_kb(key))
+    await cq.answer()
 
 @dp.callback_query(F.data.startswith("tpl:view:"))
 async def cb_tpl_view(cq: CallbackQuery):
@@ -450,7 +472,7 @@ async def cb_tpl_view(cq: CallbackQuery):
     tpl = get_template(key)
     if not tpl:
         await cq.answer("Template não encontrado", show_alert=True); return
-    await cq.message.answer(f"👁️ <b>{tpl['title']}</b>\n\n<code>{tpl['body']}</code>")
+    await cq.message.answer(f"👁️ <b>{tpl['title']}</b>\n\n<code>{tpl['body']}</code>", reply_markup=template_actions_kb(key))
     await cq.answer()
 
 @dp.callback_query(F.data.startswith("tpl:edit:"))
@@ -475,7 +497,7 @@ async def cb_tpl_reset(cq: CallbackQuery):
     ok = reset_template(key)
     if not ok:
         await cq.answer("Chave inválida.", show_alert=True); return
-    await cq.message.answer("✅ Template resetado.")
+    await cq.message.answer("✅ Template resetado.", reply_markup=template_actions_kb(key))
     await cq.answer()
 
 @dp.message(EditTemplate.waiting_body)
@@ -489,7 +511,7 @@ async def tpl_receive_body(m: Message, state: FSMContext):
     body = (m.text or "").strip()
     update_template(key, body=body)
     await state.clear()
-    await m.answer("✅ Template atualizado.")
+    await m.answer("✅ Template atualizado.", reply_markup=template_actions_kb(key))
 
 # ---------------------- Cadastro de usuário ----------------------
 @dp.message(CadastroUsuario.nome)
