@@ -1,29 +1,42 @@
-FROM python:3.11-slim
+# Dockerfile
+FROM python:3.12-slim
 
-# Set working directory
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    NODE_ENV=production \
+    TZ=America/Sao_Paulo
+
+# deps do sistema
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates supervisor gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 20 LTS (para o servidor Baileys)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copy all files
-COPY . /app
+# Python deps (usa ARQUIVO NOVO para quebrar cache e evitar reqs antigos)
+COPY requirements.app.txt /app/requirements.app.txt
+RUN pip install -r /app/requirements.app.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir \
-    python-telegram-bot \
-    psycopg2-binary \
-    apscheduler \
-    pytz \
-    qrcode \
-    pillow \
-    requests \
-    python-dotenv \
-    flask \
-    gunicorn
+# Node deps
+COPY package.json package-lock.json /app/
+RUN npm ci --omit=dev
 
-# Expose port
-EXPOSE 5000
+# Código
+COPY bot_complete.py db.py /app/
+COPY wa_server.js /app/
+COPY supervisord.conf /app/supervisord.conf
 
-# Make start.sh executable
-RUN chmod +x start.sh
+# Sessão do Baileys
+RUN mkdir -p /app/wa_auth
 
-# Run the application using the smart start script
-CMD ["./start.sh"]
+# Healthcheck (usa porta dinâmica do Railway: $PORT)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD sh -c 'curl -fsS "http://127.0.0.1:${PORT:-3000}/health" || exit 1'
+
+CMD ["supervisord", "-c", "/app/supervisord.conf"]
