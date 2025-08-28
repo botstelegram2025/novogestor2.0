@@ -4851,7 +4851,7 @@ def main():
         scheduler_service.start()
         
         # Create application
-        application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+        application = Application.builder().token(Config.BOT_TOKEN).build()
         
         # Register conversation handlers
         user_registration_handler = ConversationHandler(
