@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Assinatura</h1>
+</div>
+
+<div class="row">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="m-0 font-weight-bold text-primary">Status da Assinatura</h6>
+            </div>
+            <div class="card-body">
+                {% if user.is_trial %}
+                    <div class="alert alert-info">
+                        <h5><i class="fas fa-gift"></i> Período de Teste</h5>
+                        <p>Você está no período de teste gratuito de 7 dias.</p>
+                        <p><strong>Dias restantes:</strong> {{ trial_days_left }}</p>
+                        {% if trial_days_left <= 2 %}
+                            <p class="text-warning"><i class="fas fa-exclamation-triangle"></i> Seu teste expira em breve!</p>
+                        {% endif %}
+                    </div>
+                {% else %}
+                    <div class="alert alert-success">
+                        <h5><i class="fas fa-crown"></i> Plano Premium</h5>
+                        <p>Sua assinatura está ativa!</p>
+                        {% if user.next_due_date %}
+                            <p><strong>Próximo vencimento:</strong> {{ user.next_due_date.strftime('%d/%m/%Y') }}</p>
+                            <p><strong>Dias restantes:</strong> {{ subscription_days_left }}</p>
+                        {% endif %}
+                    </div>
+                {% endif %}
+                
+                {% if not user.is_active %}
+                    <div class="alert alert-danger">
+                        <h5><i class="fas fa-exclamation-triangle"></i> Conta Inativa</h5>
+                        <p>Sua assinatura venceu. Renove para continuar usando todas as funcionalidades.</p>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+        
+        <div class="card mt-4">
+            <div class="card-header">
+                <h6 class="m-0 font-weight-bold text-primary">Plano Premium</h6>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-8">
+                        <h4>R$ 20,00 <small class="text-muted">/ mês</small></h4>
+                        <p class="text-muted">Acesso completo a todas as funcionalidades</p>
+                        
+                        <ul class="list-unstyled">
+                            <li><i class="fas fa-check text-success"></i> Gestão ilimitada de clientes</li>
+                            <li><i class="fas fa-check text-success"></i> Lembretes automáticos via WhatsApp</li>
+                            <li><i class="fas fa-check text-success"></i> Controle de vencimentos</li>
+                            <li><i class="fas fa-check text-success"></i> Templates personalizáveis</li>
+                            <li><i class="fas fa-check text-success"></i> Relatórios detalhados</li>
+                            <li><i class="fas fa-check text-success"></i> Suporte prioritário</li>
+                        </ul>
+                        
+                        {% if user.is_trial or not user.is_active %}
+                        <form method="POST" action="{{ url_for('subscribe') }}">
+                            <button type="submit" class="btn btn-primary btn-lg">
+                                <i class="fas fa-credit-card"></i> 
+                                {% if user.is_trial %}Assinar Agora{% else %}Renovar Assinatura{% endif %}
+                            </button>
+                        </form>
+                        {% endif %}
+                    </div>
+                    <div class="col-md-4 text-center">
+                        <i class="fas fa-crown fa-5x text-warning"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="m-0 font-weight-bold text-info">Pagamento PIX</h6>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">
+                    <i class="fas fa-shield-alt"></i> <strong>Pagamento seguro</strong><br>
+                    Processado pelo Mercado Pago
+                </p>
+                
+                <p class="text-muted">
+                    <i class="fas fa-bolt"></i> <strong>Instantâneo</strong><br>
+                    Ativação automática após pagamento
+                </p>
+                
+                <p class="text-muted">
+                    <i class="fas fa-mobile-alt"></i> <strong>Fácil</strong><br>
+                    Pague pelo app do seu banco
+                </p>
+                
+                <hr>
+                
+                <h6>Como funciona:</h6>
+                <ol class="text-muted small">
+                    <li>Clique em "Assinar Agora"</li>
+                    <li>Escaneie o QR Code PIX</li>
+                    <li>Confirme o pagamento</li>
+                    <li>Ativação automática!</li>
+                </ol>
+            </div>
+        </div>
+        
+        <div class="card mt-3">
+            <div class="card-header">
+                <h6 class="m-0 font-weight-bold text-success">Garantia</h6>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">
+                    <i class="fas fa-undo"></i> <strong>30 dias de garantia</strong><br>
+                    Não ficou satisfeito? Devolvemos seu dinheiro!
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

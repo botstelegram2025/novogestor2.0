@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-center" style="min-height: 100vh;">
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-md-8 col-lg-6">
+                <div class="card">
+                    <div class="card-body p-5 text-center">
+                        <h1 class="mb-4">
+                            <i class="fab fa-whatsapp text-success"></i> 
+                            Bot WhatsApp
+                        </h1>
+                        <h3 class="mb-4">Gestão de Clientes</h3>
+                        <p class="text-muted mb-4">
+                            Gerencie seus clientes e envie lembretes automáticos via WhatsApp
+                        </p>
+                        
+                        <div class="row mb-4">
+                            <div class="col-md-6">
+                                <div class="feature-box">
+                                    <i class="fas fa-users fa-2x text-primary mb-2"></i>
+                                    <h6>Gestão de Clientes</h6>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="feature-box">
+                                    <i class="fas fa-bell fa-2x text-warning mb-2"></i>
+                                    <h6>Lembretes Automáticos</h6>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="row mb-4">
+                            <div class="col-md-6">
+                                <div class="feature-box">
+                                    <i class="fas fa-calendar fa-2x text-info mb-2"></i>
+                                    <h6>Controle de Vencimentos</h6>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="feature-box">
+                                    <i class="fas fa-credit-card fa-2x text-success mb-2"></i>
+                                    <h6>Pagamentos PIX</h6>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <a href="{{ url_for('login') }}" class="btn btn-primary btn-lg">
+                            <i class="fas fa-sign-in-alt"></i> Começar Agora
+                        </a>
+                        
+                        <div class="mt-4">
+                            <small class="text-muted">
+                                <i class="fas fa-gift"></i> 7 dias grátis + R$ 20,00/mês
+                            </small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

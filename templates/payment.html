@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Pagamento PIX</h1>
+</div>
+
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="m-0 font-weight-bold text-primary">Finalize seu Pagamento</h6>
+            </div>
+            <div class="card-body text-center">
+                <div class="alert alert-info">
+                    <h5><i class="fas fa-qrcode"></i> Escaneie o QR Code PIX</h5>
+                    <p>Use o app do seu banco para escanear o código abaixo e finalizar o pagamento</p>
+                </div>
+                
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>QR Code PIX</h6>
+                        {% if payment.qr_code_base64 %}
+                            <img src="data:image/png;base64,{{ payment.qr_code_base64 }}" 
+                                 alt="QR Code PIX" class="img-fluid" style="max-width: 300px;">
+                        {% endif %}
+                    </div>
+                    <div class="col-md-6">
+                        <h6>Informações do Pagamento</h6>
+                        <div class="text-left">
+                            <p><strong>Valor:</strong> R$ {{ "%.2f"|format(payment.amount) }}</p>
+                            <p><strong>Descrição:</strong> Assinatura WhatsApp Bot</p>
+                            <p><strong>Status:</strong> 
+                                <span class="badge bg-warning">Aguardando Pagamento</span>
+                            </p>
+                        </div>
+                        
+                        <hr>
+                        
+                        <h6>Código PIX Copia e Cola</h6>
+                        <div class="input-group">
+                            <input type="text" class="form-control" 
+                                   value="{{ payment.qr_code }}" 
+                                   id="pixCode" readonly>
+                            <button class="btn btn-outline-secondary" type="button" 
+                                    onclick="copyPixCode()">
+                                <i class="fas fa-copy"></i> Copiar
+                            </button>
+                        </div>
+                        <small class="text-muted">Cole este código no seu app bancário</small>
+                    </div>
+                </div>
+                
+                <div class="alert alert-warning mt-4">
+                    <h6><i class="fas fa-clock"></i> Aguardando Confirmação</h6>
+                    <p>Assim que o pagamento for aprovado, sua assinatura será ativada automaticamente.</p>
+                    <div id="paymentStatus">
+                        <button class="btn btn-primary" onclick="checkPaymentStatus()">
+                            <i class="fas fa-refresh"></i> Verificar Pagamento
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="text-center mt-4">
+                    <a href="{{ url_for('subscription') }}" class="btn btn-secondary">
+                        <i class="fas fa-arrow-left"></i> Voltar
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyPixCode() {
+    const pixCode = document.getElementById('pixCode');
+    pixCode.select();
+    pixCode.setSelectionRange(0, 99999);
+    document.execCommand('copy');
+    
+    // Show feedback
+    const button = event.target.closest('button');
+    const originalText = button.innerHTML;
+    button.innerHTML = '<i class="fas fa-check"></i> Copiado!';
+    button.classList.add('btn-success');
+    button.classList.remove('btn-outline-secondary');
+    
+    setTimeout(() => {
+        button.innerHTML = originalText;
+        button.classList.remove('btn-success');
+        button.classList.add('btn-outline-secondary');
+    }, 2000);
+}
+
+function checkPaymentStatus() {
+    const button = document.querySelector('#paymentStatus button');
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verificando...';
+    button.disabled = true;
+    
+    // Simulate payment check
+    setTimeout(() => {
+        button.innerHTML = '<i class="fas fa-refresh"></i> Verificar Pagamento';
+        button.disabled = false;
+        
+        // For demo purposes, show payment not confirmed yet
+        alert('Pagamento ainda não confirmado. Tente novamente em alguns minutos.');
+    }, 2000);
+}
+
+// Auto-check payment status every 30 seconds
+setInterval(() => {
+    console.log('Verificando status do pagamento...');
+    // Here you would make an API call to check payment status
+}, 30000);
+</script>
+{% endblock %}

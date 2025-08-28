@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Clientes</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <div class="btn-group me-2">
+            <a href="{{ url_for('add_client') }}" class="btn btn-sm btn-primary">
+                <i class="fas fa-plus"></i> Novo Cliente
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="m-0 font-weight-bold text-primary">Lista de Clientes</h6>
+            </div>
+            <div class="card-body">
+                {% if clients %}
+                <div class="table-responsive">
+                    <table class="table table-bordered">
+                        <thead>
+                            <tr>
+                                <th>Nome</th>
+                                <th>Telefone</th>
+                                <th>Plano</th>
+                                <th>Valor</th>
+                                <th>Vencimento</th>
+                                <th>Status</th>
+                                <th>Ações</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for client in clients %}
+                            <tr>
+                                <td>{{ client.name }}</td>
+                                <td>{{ client.phone_number }}</td>
+                                <td>{{ client.plan_name or '-' }}</td>
+                                <td>
+                                    {% if client.plan_price %}
+                                        R$ {{ "%.2f"|format(client.plan_price) }}
+                                    {% else %}
+                                        -
+                                    {% endif %}
+                                </td>
+                                <td>{{ client.due_date.strftime('%d/%m/%Y') }}</td>
+                                <td>
+                                    {% if client.status == 'active' %}
+                                        <span class="badge bg-success">Ativo</span>
+                                    {% else %}
+                                        <span class="badge bg-secondary">Inativo</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <button class="btn btn-sm btn-success" onclick="sendReminder({{ client.id }})">
+                                        <i class="fab fa-whatsapp"></i> Lembrete
+                                    </button>
+                                    <a href="#" class="btn btn-sm btn-warning">
+                                        <i class="fas fa-edit"></i> Editar
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="text-center py-4">
+                    <i class="fas fa-users fa-3x text-muted mb-3"></i>
+                    <h5>Nenhum cliente cadastrado</h5>
+                    <p class="text-muted">Comece adicionando seu primeiro cliente!</p>
+                    <a href="{{ url_for('add_client') }}" class="btn btn-primary">
+                        <i class="fas fa-plus"></i> Adicionar Cliente
+                    </a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function sendReminder(clientId) {
+    if (confirm('Enviar lembrete via WhatsApp para este cliente?')) {
+        fetch(`/api/clients/${clientId}/send-reminder`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert('Lembrete enviado com sucesso!');
+            } else {
+                alert('Erro ao enviar lembrete: ' + data.error);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Erro ao enviar lembrete');
+        });
+    }
+}
+</script>
+{% endblock %}

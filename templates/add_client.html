@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Adicionar Cliente</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <div class="btn-group me-2">
+            <a href="{{ url_for('clients') }}" class="btn btn-sm btn-secondary">
+                <i class="fas fa-arrow-left"></i> Voltar
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="m-0 font-weight-bold text-primary">Dados do Cliente</h6>
+            </div>
+            <div class="card-body">
+                <form method="POST">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="name" class="form-label">Nome *</label>
+                                <input type="text" class="form-control" id="name" name="name" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="phone" class="form-label">WhatsApp (DDD + Número) *</label>
+                                <input type="tel" class="form-control" id="phone" name="phone" 
+                                       placeholder="11999999999" required>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="plan_name" class="form-label">Nome do Plano/Serviço *</label>
+                                <input type="text" class="form-control" id="plan_name" name="plan_name" 
+                                       placeholder="Ex: Plano Básico" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="plan_price" class="form-label">Valor (R$) *</label>
+                                <input type="number" class="form-control" id="plan_price" name="plan_price" 
+                                       step="0.01" min="0" placeholder="0.00" required>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="due_date" class="form-label">Data de Vencimento *</label>
+                                <input type="date" class="form-control" id="due_date" name="due_date" required>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <hr>
+                    
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                        <a href="{{ url_for('clients') }}" class="btn btn-secondary me-md-2">
+                            <i class="fas fa-times"></i> Cancelar
+                        </a>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-save"></i> Salvar Cliente
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="m-0 font-weight-bold text-info">Lembretes Automáticos</h6>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">Após cadastrar, o cliente receberá:</p>
+                <ul class="list-unstyled">
+                    <li><i class="fas fa-check text-success"></i> Mensagem de boas-vindas</li>
+                    <li><i class="fas fa-bell text-warning"></i> Lembrete 2 dias antes</li>
+                    <li><i class="fas fa-bell text-warning"></i> Lembrete 1 dia antes</li>
+                    <li><i class="fas fa-bell text-danger"></i> Lembrete no vencimento</li>
+                    <li><i class="fas fa-bell text-danger"></i> Lembrete 1 dia após</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Set minimum date to today
+document.getElementById('due_date').min = new Date().toISOString().split('T')[0];
+
+// Format phone number input
+document.getElementById('phone').addEventListener('input', function(e) {
+    let value = e.target.value.replace(/\D/g, '');
+    e.target.value = value;
+});
+
+// Format price input
+document.getElementById('plan_price').addEventListener('input', function(e) {
+    let value = parseFloat(e.target.value);
+    if (isNaN(value)) {
+        e.target.value = '';
+    }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Dashboard</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <div class="btn-group me-2">
+            <a href="{{ url_for('add_client') }}" class="btn btn-sm btn-primary">
+                <i class="fas fa-plus"></i> Novo Cliente
+            </a>
+        </div>
+    </div>
+</div>
+
+<!-- Status Cards -->
+<div class="row mb-4">
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card border-left-primary shadow h-100 py-2">
+            <div class="card-body">
+                <div class="row no-gutters align-items-center">
+                    <div class="col mr-2">
+                        <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">
+                            Total de Clientes
+                        </div>
+                        <div class="h5 mb-0 font-weight-bold text-gray-800">{{ stats.total_clients }}</div>
+                    </div>
+                    <div class="col-auto">
+                        <i class="fas fa-users fa-2x text-gray-300"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card border-left-success shadow h-100 py-2">
+            <div class="card-body">
+                <div class="row no-gutters align-items-center">
+                    <div class="col mr-2">
+                        <div class="text-xs font-weight-bold text-success text-uppercase mb-1">
+                            Clientes Ativos
+                        </div>
+                        <div class="h5 mb-0 font-weight-bold text-gray-800">{{ stats.active_clients }}</div>
+                    </div>
+                    <div class="col-auto">
+                        <i class="fas fa-check-circle fa-2x text-gray-300"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card border-left-warning shadow h-100 py-2">
+            <div class="card-body">
+                <div class="row no-gutters align-items-center">
+                    <div class="col mr-2">
+                        <div class="text-xs font-weight-bold text-warning text-uppercase mb-1">
+                            Vencendo em 7 dias
+                        </div>
+                        <div class="h5 mb-0 font-weight-bold text-gray-800">{{ stats.expiring_soon }}</div>
+                    </div>
+                    <div class="col-auto">
+                        <i class="fas fa-calendar-exclamation fa-2x text-gray-300"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card border-left-info shadow h-100 py-2">
+            <div class="card-body">
+                <div class="row no-gutters align-items-center">
+                    <div class="col mr-2">
+                        <div class="text-xs font-weight-bold text-info text-uppercase mb-1">
+                            Status WhatsApp
+                        </div>
+                        <div class="h5 mb-0 font-weight-bold" id="whatsapp-status">
+                            <i class="fas fa-spinner fa-spin"></i> Verificando...
+                        </div>
+                    </div>
+                    <div class="col-auto">
+                        <i class="fab fa-whatsapp fa-2x text-gray-300"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Subscription Status -->
+<div class="row mb-4">
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="m-0 font-weight-bold text-primary">Status da Assinatura</h6>
+            </div>
+            <div class="card-body">
+                {% if stats.is_trial %}
+                    <div class="alert alert-info">
+                        <i class="fas fa-gift"></i> <strong>Período de Teste</strong><br>
+                        Dias restantes: <strong>{{ stats.trial_days_left }}</strong>
+                    </div>
+                {% else %}
+                    <div class="alert alert-success">
+                        <i class="fas fa-crown"></i> <strong>Plano Premium Ativo</strong><br>
+                        Assinatura: R$ 20,00/mês
+                    </div>
+                {% endif %}
+                
+                {% if not stats.is_active %}
+                    <div class="alert alert-danger">
+                        <i class="fas fa-exclamation-triangle"></i> <strong>Conta Inativa</strong><br>
+                        <a href="{{ url_for('subscription') }}" class="btn btn-sm btn-danger">Renovar Agora</a>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="m-0 font-weight-bold text-primary">WhatsApp Connection</h6>
+            </div>
+            <div class="card-body" id="whatsapp-connection">
+                <div class="text-center">
+                    <i class="fas fa-spinner fa-spin"></i> Carregando status...
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Check WhatsApp status
+    function checkWhatsAppStatus() {
+        fetch('/api/whatsapp/status')
+            .then(response => response.json())
+            .then(data => {
+                const statusElement = document.getElementById('whatsapp-status');
+                const connectionElement = document.getElementById('whatsapp-connection');
+                
+                if (data.success && data.connected) {
+                    statusElement.innerHTML = '<i class="fas fa-check-circle text-success"></i> Conectado';
+                    connectionElement.innerHTML = '<div class="alert alert-success"><i class="fab fa-whatsapp"></i> WhatsApp conectado e funcionando!</div>';
+                } else if (data.qr_code) {
+                    statusElement.innerHTML = '<i class="fas fa-qrcode text-warning"></i> QR Code';
+                    connectionElement.innerHTML = `
+                        <div class="alert alert-warning">
+                            <h6><i class="fas fa-qrcode"></i> Escaneie o QR Code</h6>
+                            <p>Abra o WhatsApp no seu celular e escaneie o código abaixo:</p>
+                            <div class="text-center">
+                                <img src="${data.qr_code}" alt="QR Code" class="img-fluid" style="max-width: 250px;">
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    statusElement.innerHTML = '<i class="fas fa-times-circle text-danger"></i> Desconectado';
+                    connectionElement.innerHTML = '<div class="alert alert-danger"><i class="fas fa-exclamation-triangle"></i> WhatsApp desconectado. Verifique a conexão.</div>';
+                }
+            })
+            .catch(error => {
+                console.error('Error checking WhatsApp status:', error);
+                document.getElementById('whatsapp-status').innerHTML = '<i class="fas fa-exclamation-triangle text-warning"></i> Erro';
+                document.getElementById('whatsapp-connection').innerHTML = '<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i> Erro ao verificar status do WhatsApp.</div>';
+            });
+    }
+
+    // Check status on page load
+    checkWhatsAppStatus();
+    
+    // Check status every 30 seconds
+    setInterval(checkWhatsAppStatus, 30000);
+</script>
+{% endblock %}
