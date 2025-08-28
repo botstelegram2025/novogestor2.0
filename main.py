@@ -3,15 +3,16 @@ import sys
 import logging
 import asyncio
 from datetime import datetime, date, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+
+from config import Config  # <-- sem o ponto
+
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+)
 from telegram.ext import (
-    Application, 
-    CommandHandler, 
-    CallbackQueryHandler, 
-    ConversationHandler,
-    MessageHandler,
-    filters,
-    ContextTypes
+    Application, CommandHandler, CallbackQueryHandler,
+    ConversationHandler, MessageHandler, filters, ContextTypes
 )
 
 # --- Logging (stdout only, recomendado para Railway) ---
