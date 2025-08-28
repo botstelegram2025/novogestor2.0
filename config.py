@@ -5,7 +5,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Config:
     # Telegram / DB
-    BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
     # WhatsApp (se você usa)
