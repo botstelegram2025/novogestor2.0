@@ -1,5 +1,6 @@
-import logging
 import os
+import sys
+import logging
 import asyncio
 from datetime import datetime, date, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -13,16 +14,19 @@ from telegram.ext import (
     ContextTypes
 )
 
-# Configure logging
+# --- Logging (stdout only, recomendado para Railway) ---
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
+    level=LOG_LEVEL,
+    format=LOG_FORMAT,
+    handlers=[logging.StreamHandler(sys.stdout)]
+    # opcional: force=True  # se quiser sobrescrever configs de logging pré-existentes
 )
+
 logger = logging.getLogger(__name__)
+
 
 # Import configurations and services
 from config import Config
