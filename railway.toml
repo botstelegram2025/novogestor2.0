@@ -1,5 +1,38 @@
 [build]
-builder = "NIXPACKS"
+builder = "nixpacks"
 
 [deploy]
-startCommand = "python bot_complete.py"
+numReplicas = 1
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# Environment variables for Railway
+[env]
+NODE_ENV = "production"
+PYTHONUNBUFFERED = "1"
+PYTHONPATH = "/app"
+PORT = "8080"
+WHATSAPP_PORT = "3001"
+
+[[services]]
+# Telegram Bot Service
+name = "telegram-bot"
+source = "."
+startCommand = "python main.py"
+[services.healthcheck]
+path = "/health"
+timeout = 30
+interval = 60
+
+[[services]]
+# WhatsApp Baileys Service  
+name = "whatsapp-baileys"
+source = "."
+startCommand = "node whatsapp_baileys_multi.js"
+[services.healthcheck]
+path = "/health"
+timeout = 30
+interval = 60
+
+[networking]
+serviceDomains = true

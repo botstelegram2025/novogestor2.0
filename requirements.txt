@@ -1,11 +1,16 @@
-# requirements.app.txt
-# Somente o que o seu bot realmente usa em Python.
-aiogram==3.7.0
-python-dotenv==1.0.1
-psycopg2-binary==2.9.10
+python-telegram-bot==21.6
+flask==3.0.3
+flask-sqlalchemy==3.1.1
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.9
 requests==2.32.3
-typing-extensions==4.14.1
-
-
-
-
+python-dotenv==1.0.1
+apscheduler==3.10.4
+mercadopago==2.2.3
+qrcode==7.4.2
+pillow==10.4.0
+pytz==2024.2
+schedule==1.2.2
+psutil==6.0.0
+cryptography==43.0.1
+gunicorn==21.2.0

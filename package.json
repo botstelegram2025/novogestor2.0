@@ -1,11 +1,19 @@
 {
-  "name": "baileys-api",
+  "name": "workspace",
   "version": "1.0.0",
-  "main": "wa_server.js",
-  "license": "MIT",
+  "main": "whatsapp_baileys.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.9",
-    "express": "^4.19.2",
-    "qrcode": "^1.5.3"
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "qrcode": "^1.5.4"
   }
 }
